@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">LiveXP</string>
+    <string name="module_desc">在 QQ 聊天界面为实况图片(动态照片)气泡显示「实况」角标</string>
+    <string-array name="xposed_scope">
+        <item>com.tencent.mobileqq</item>
+    </string-array>
+</resources>

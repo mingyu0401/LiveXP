@@ -1,0 +1,25 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.livexp.qq'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.livexp.qq'
+        minSdk 27
+        targetSdk 36
+        versionCode 23
+        versionName '1.22'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+}
+
+dependencies {
+    compileOnly 'de.robv.android.xposed:api:82'
+    compileOnly 'androidx.constraintlayout:constraintlayout:2.1.4'
+}

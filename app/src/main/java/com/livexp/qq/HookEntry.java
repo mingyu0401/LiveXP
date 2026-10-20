@@ -1,0 +1,52 @@
+package com.livexp.qq;
+
+import de.robv.android.xposed.IXposedHookLoadPackage;
+import de.robv.android.xposed.callbacks.XC_LoadPackage;
+
+public class HookEntry implements IXposedHookLoadPackage {
+
+    private static final String QQ_PACKAGE = "com.tencent.mobileqq";
+    static final String TAG = "LiveXP";
+
+    @Override
+    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
+        if (!QQ_PACKAGE.equals(lpparam.packageName)) return;
+        if (!QQ_PACKAGE.equals(lpparam.processName)) return;
+        Log.init();
+        Log.i("module loaded, version " + BuildConfig.VERSION_NAME);
+        try {
+            RuntimeLoaderHook.install(lpparam.classLoader);
+        } catch (Throwable t) {
+            Log.i("runtime loader hook failed: " + t);
+        }
+    }
+
+    static void startHooks(ClassLoader realCl) {
+        if (!startedOnce()) {
+            return;
+        }
+        Log.i("installing all hooks with classloader: " + realCl);
+        try {
+            LiveBadgeHook.install(realCl);
+        } catch (Throwable t) {
+            Log.i("badge hook install failed: " + t);
+        }
+        try {
+            LiveProbeHook.install(realCl);
+        } catch (Throwable t) {
+            Log.i("probe hook failed: " + t);
+        }
+        try {
+            SettingsEntryHook.install(realCl);
+        } catch (Throwable t) {
+            Log.i("settings entry failed: " + t);
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicBoolean STARTED =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private static boolean startedOnce() {
+        return STARTED.compareAndSet(false, true);
+    }
+}
