@@ -113,12 +113,13 @@ public final class LiveBadgeHook {
         Object host = hostViewGetter.invoke(param.thisObject);
         if (!(host instanceof ViewGroup)) return;
         ViewGroup root = (ViewGroup) host;
-        if (LivePhotoDetector.isLive(msgRecord)) {
+        // TODO 校准期临时逻辑:所有图片气泡一律打标,等实况判定校准完成后换回
+        //  if (LivePhotoDetector.isLive(msgRecord)) show else { hide; scheduleFileCheck }
+        if (LivePhotoDetector.hasPicAndDump(msgRecord)) {
             BadgeInjector.show(root);
+            OpenImageSaver.probeLocalPath(msgItem);
         } else {
             BadgeInjector.hide(root);
-            // 接收方原图没有 sourcePath,异步去 QQ 缓存按 md5 找原图做文件级判定
-            LivePhotoDetector.scheduleFileCheck(msgRecord, root);
         }
     }
 

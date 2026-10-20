@@ -37,6 +37,11 @@ public class HookEntry implements IXposedHookLoadPackage {
             Log.i("probe hook failed: " + t);
         }
         try {
+            OpenImageSaver.install(realCl);
+        } catch (Throwable t) {
+            Log.i("open-saver install failed: " + t);
+        }
+        try {
             SettingsEntryHook.install(realCl);
         } catch (Throwable t) {
             Log.i("settings entry failed: " + t);

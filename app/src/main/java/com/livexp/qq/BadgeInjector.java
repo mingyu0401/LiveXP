@@ -5,14 +5,10 @@ import android.graphics.drawable.GradientDrawable;
 import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.TextView;
 
-import androidx.constraintlayout.widget.ConstraintLayout;
-import androidx.constraintlayout.widget.ConstraintSet;
-
-/** 在聊天气泡根布局(BaseChatItemLayout)上叠加/移除「实况」角标。 */
+/** 在聊天气泡根布局上叠加「实况」角标。不依赖 androidx 类(QQ 进程里没有模块的依赖)。 */
 public final class BadgeInjector {
 
     private static final int BADGE_ID = 0x7e0b1e02;
@@ -33,29 +29,31 @@ public final class BadgeInjector {
         bg.setColor(0x99000000);
         bg.setCornerRadius(dp(root, 6));
         badge.setBackground(bg);
+        root.addView(badge);
+        positionOverImage(root, badge);
+        // 绑定时子视图往往还没布局,布局完成后再校正位置
+        badge.post(() -> {
+            if (badge.getParent() == root) positionOverImage(root, badge);
+        });
+    }
 
-        if (root instanceof ConstraintLayout) {
-            ConstraintLayout cl = (ConstraintLayout) root;
-            cl.addView(badge, new ConstraintLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            View anchor = directChildOf(root, findFirstImageView(root));
-            ConstraintSet cs = new ConstraintSet();
-            cs.clone(cl);
-            int anchorId;
-            if (anchor != null) {
-                if (anchor.getId() == View.NO_ID) anchor.setId(View.generateViewId());
-                anchorId = anchor.getId();
-            } else {
-                anchorId = ConstraintSet.PARENT_ID;
+    private static void positionOverImage(ViewGroup root, TextView badge) {
+        View anchor = findLargestImageView(root);
+        if (anchor == null) return;
+        float dx = 0, dy = 0;
+        View cur = anchor;
+        while (cur != root) {
+            dx += cur.getLeft() + cur.getTranslationX();
+            dy += cur.getTop() + cur.getTranslationY();
+            android.view.ViewParent p = cur.getParent();
+            if (!(p instanceof View)) {
+                return;
             }
-            int margin = dp(root, 4);
-            cs.connect(BADGE_ID, ConstraintSet.TOP, anchorId, ConstraintSet.TOP, margin);
-            cs.connect(BADGE_ID, ConstraintSet.START, anchorId, ConstraintSet.START, margin);
-            cs.applyTo(cl);
-        } else {
-            root.addView(badge, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            cur = (View) p;
         }
+        // 右上角:图片右缘往左收一个角标宽,再留 4dp 边距
+        badge.setTranslationX(dx + anchor.getWidth() - badge.getWidth() - dp(root, 4));
+        badge.setTranslationY(dy + dp(root, 4));
     }
 
     public static void hide(ViewGroup root) {
@@ -63,25 +61,30 @@ public final class BadgeInjector {
         if (badge != null) root.removeView(badge);
     }
 
-    private static View directChildOf(ViewGroup root, View view) {
-        View current = view;
-        while (current != null && current.getParent() != root) {
-            if (!(current.getParent() instanceof View)) return null;
-            current = (View) current.getParent();
-        }
-        return current;
-    }
-
-    private static View findFirstImageView(ViewGroup group) {
+    /** 气泡根布局里头像和消息图都是 ImageView;实况标要贴在消息图上,取面积最大的那个。 */
+    private static View findLargestImageView(ViewGroup group) {
+        View best = null;
+        long bestArea = -1;
         for (int i = 0; i < group.getChildCount(); i++) {
             View child = group.getChildAt(i);
-            if (child instanceof ImageView) return child;
-            if (child instanceof ViewGroup) {
-                View found = findFirstImageView((ViewGroup) child);
-                if (found != null) return found;
+            if (child instanceof ImageView) {
+                long area = (long) child.getWidth() * child.getHeight();
+                if (area > bestArea) {
+                    bestArea = area;
+                    best = child;
+                }
+            } else if (child instanceof ViewGroup) {
+                View found = findLargestImageView((ViewGroup) child);
+                if (found != null) {
+                    long area = (long) found.getWidth() * found.getHeight();
+                    if (area > bestArea) {
+                        bestArea = area;
+                        best = found;
+                    }
+                }
             }
         }
-        return null;
+        return best;
     }
 
     private static int dp(View v, float value) {
