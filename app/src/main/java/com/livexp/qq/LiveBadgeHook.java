@@ -122,6 +122,12 @@ public final class LiveBadgeHook {
             BadgeInjector.show(root);
             return;
         }
+        // md5 库1快速路径:实况 md5 已持久化,无需扫描直接打标
+        if (LivePhotoDetector.isKnownLiveMd5(msgRecord)) {
+            if (msgId != null) LivePhotoDetector.liveMsgIds.add(msgId);
+            BadgeInjector.show(root);
+            return;
+        }
         BadgeInjector.hide(root);
         String path = OpenImageSaver.probeLocalPath(msgItem);
         LivePhotoDetector.detectAsync(path, msgRecord, root);

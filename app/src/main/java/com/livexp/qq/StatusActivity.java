@@ -1,16 +1,10 @@
 package com.livexp.qq;
 
 import android.app.Activity;
-import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.net.Uri;
 import android.os.Bundle;
-import android.os.Environment;
-import android.provider.Settings;
-import android.view.Gravity;
 import android.view.ViewGroup;
-import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -23,8 +17,8 @@ import java.util.ArrayDeque;
 /** LiveXP 独立状态页:显示模块运行日志末尾内容。 */
 public class StatusActivity extends Activity {
 
-    // 注意:模块自身进程读不了 QQ 的 Android/data,这里保留入口但多半会显示提示;
-    // 看日志请用 QQ 设置页的 LiveXP 胶囊弹窗(QQ 进程内可读自己的数据目录)。
+    // 日志在 QQ 进程内写入 QQ 自己的数据目录;本 App 不是 QQ,拿不到该路径,
+    // 看日志请用 QQ 设置页的「LiveXP 已加载」胶囊弹窗(QQ 进程内可读自己的数据目录)。
     private static final File LOG_FILE = new File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/livexp.log");
 
     private LinearLayout container;
@@ -94,31 +88,9 @@ public class StatusActivity extends Activity {
             hint.setTextColor(0xFFE8B04B);
             hint.setTextSize(14);
             hint.setLineSpacing(dp(4), 1f);
-            hint.setText("无法读取日志文件\n\nLiveXP 在 QQ 进程里把日志写到:\n/sdcard/Download/LiveXP/livexp.log\n\n需要授予「所有文件访问权限」才能在这个界面里查看。");
+            hint.setText("无法读取日志文件\n\n日志由模块在 QQ 进程内写入:\n/sdcard/Android/data/com.tencent.mobileqq/LiveXP/livexp.log\n\n该目录只有 QQ 自己能读,本 App 拿不到。\n请打开 QQ → 设置 → 点「LiveXP 已加载」胶囊查看运行日志。");
             container.addView(hint, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-            if (!Environment.isExternalStorageManager()) {
-                Button grant = new Button(this);
-                grant.setText("授予文件访问权限");
-                grant.setTextColor(Color.WHITE);
-                grant.setBackgroundColor(0xFF2E7D32);
-                grant.setOnClickListener(v -> {
-                    try {
-                        startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                                Uri.parse("package:" + getPackageName())));
-                    } catch (Throwable t) {
-                        try {
-                            startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
-                        } catch (Throwable ignored) {}
-                    }
-                });
-                LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                btnLp.topMargin = dp(16);
-                btnLp.gravity = Gravity.CENTER_HORIZONTAL;
-                container.addView(grant, btnLp);
-            }
         }
     }
 

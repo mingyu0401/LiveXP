@@ -530,8 +530,12 @@ public final class SettingsEntryHook {
             logView.setTypeface(Typeface.MONOSPACE);
             logView.setTextSize(11);
             logView.setTextColor(0xFFD7E3EE);
+            String stats = "实况判定 " + LivePhotoDetector.liveMsgIds.size()
+                    + " 条 · 命中 " + LivePhotoDetector.liveHitCount
+                    + " · md5库 实况 " + LivePhotoDetector.md5LiveCount()
+                    + " / 非实况 " + LivePhotoDetector.md5StaticCount() + "\n\n";
             String tail = readLogTail(120);
-            logView.setText(tail != null ? tail : "(无法读取日志)");
+            logView.setText(stats + (tail != null ? tail : "(无法读取日志)"));
 
             ScrollView scroll = new ScrollView(ctx);
             scroll.addView(logView);
@@ -559,7 +563,9 @@ public final class SettingsEntryHook {
                 + "msgItem 解析: " + LiveBadgeHook.msgItemMethod + "\n"
                 + "气泡绑定次数: " + LiveBadgeHook.boundCount + "\n"
                 + "已判定实况消息数: " + LivePhotoDetector.liveMsgIds.size() + "\n"
-                + "实况图命中数: " + LivePhotoDetector.liveHitCount;
+                + "实况图命中数: " + LivePhotoDetector.liveHitCount + "\n"
+                + "md5 库(实况): " + LivePhotoDetector.md5LiveCount() + " 条\n"
+                + "md5 库(非实况): " + LivePhotoDetector.md5StaticCount() + " 条";
         try {
             new AlertDialog.Builder(ctx)
                     .setTitle("LiveXP 状态")

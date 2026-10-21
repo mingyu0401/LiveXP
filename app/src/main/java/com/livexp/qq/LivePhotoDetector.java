@@ -4,7 +4,10 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.ViewGroup;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
+import java.io.FileWriter;
 import java.io.RandomAccessFile;
 import java.lang.reflect.Field;
 import java.util.List;
@@ -44,6 +47,17 @@ public final class LivePhotoDetector {
 
     private static final ExecutorService SCAN_EXEC = Executors.newSingleThreadExecutor();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
+
+    // md5 持久库:库1=已确认实况,库2=已确认非实况。只在文件真实存在(≥1MB)后记录,
+    // 跨重启免重扫;文件还没下载到本地时不产生任何记录,等下次 bind 再判。
+    private static final File MD5_LIVE_FILE =
+            new File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/md5_live.txt");
+    private static final File MD5_STATIC_FILE =
+            new File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/md5_static.txt");
+    private static final Set<String> md5Live = ConcurrentHashMap.newKeySet();
+    private static final Set<String> md5Static = ConcurrentHashMap.newKeySet();
+    private static volatile boolean md5Loaded;
+    private static final Object MD5_LOCK = new Object();
 
     private LivePhotoDetector() {}
 
@@ -91,6 +105,19 @@ public final class LivePhotoDetector {
             if (known) onLive(msgRecord, boundRoot);
             return;
         }
+        ensureMd5Loaded();
+        String md5 = picMd5Of(msgRecord);
+        if (md5 != null) {
+            if (md5Live.contains(md5)) {
+                Log.i("md5 lib1 hit: " + md5);
+                onLive(msgRecord, boundRoot);
+                return;
+            }
+            if (md5Static.contains(md5)) {
+                Log.i("md5 lib2 hit: " + md5);
+                return;
+            }
+        }
         java.lang.ref.WeakReference<ViewGroup> rootRef =
                 boundRoot == null ? null : new java.lang.ref.WeakReference<>(boundRoot);
         SCAN_EXEC.execute(() -> {
@@ -104,6 +131,7 @@ public final class LivePhotoDetector {
                 Log.i("live check: " + f.getName() + " exists=" + exists
                         + " size=" + (size / 1024) + "KB -> " + (live ? "LIVE" : "static")
                         + (exists ? " magic=" + magicHex(f) : ""));
+                if (exists && size >= MIN_DETECT_BYTES) recordMd5(md5, live);
                 if (live) {
                     liveHitCount++;
                     Log.i("live photo detected: " + path);
@@ -113,6 +141,88 @@ public final class LivePhotoDetector {
                 Log.i("detect error: " + t);
             }
         });
+    }
+
+    public static int md5LiveCount() {
+        ensureMd5Loaded();
+        return md5Live.size();
+    }
+
+    public static int md5StaticCount() {
+        ensureMd5Loaded();
+        return md5Static.size();
+    }
+
+    /** bind 快速路径:该图 md5 已在库1(实况)则无需扫描直接打标。 */
+    public static boolean isKnownLiveMd5(Object msgRecord) {
+        ensureMd5Loaded();
+        String md5 = picMd5Of(msgRecord);
+        return md5 != null && md5Live.contains(md5);
+    }
+
+    /** 从 MsgRecord 的 PicElement 里取内容 md5(跨重启/跨设备稳定),小写,取不到返回 null。 */
+    public static String picMd5Of(Object msgRecord) {
+        if (msgRecord == null) return null;
+        try {
+            Object elements = XposedHelpers.getObjectField(msgRecord, "elements");
+            if (!(elements instanceof List)) return null;
+            for (Object element : (List<?>) elements) {
+                if (element == null) continue;
+                Object pic;
+                try {
+                    pic = XposedHelpers.getObjectField(element, "picElement");
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                if (pic == null) continue;
+                Object md5 = XposedHelpers.getObjectField(pic, "md5HexStr");
+                String s = md5 instanceof String ? ((String) md5).trim().toLowerCase(Locale.US) : null;
+                return (s == null || s.isEmpty()) ? null : s;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static void ensureMd5Loaded() {
+        if (md5Loaded) return;
+        synchronized (MD5_LOCK) {
+            if (md5Loaded) return;
+            loadMd5File(MD5_LIVE_FILE, md5Live);
+            loadMd5File(MD5_STATIC_FILE, md5Static);
+            md5Loaded = true;
+            Log.i("md5 libs loaded: live=" + md5Live.size() + " static=" + md5Static.size());
+        }
+    }
+
+    private static void loadMd5File(File f, Set<String> into) {
+        try (BufferedReader br = new BufferedReader(new FileReader(f))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                String m = line.trim().toLowerCase(Locale.US);
+                if (m.length() == 32) into.add(m);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void recordMd5(String md5, boolean live) {
+        if (md5 == null || md5.length() != 32) return;
+        Set<String> set = live ? md5Live : md5Static;
+        if (!set.add(md5)) return;
+        File f = live ? MD5_LIVE_FILE : MD5_STATIC_FILE;
+        synchronized (MD5_LOCK) {
+            try {
+                File dir = f.getParentFile();
+                if (!dir.isDirectory() && !dir.mkdirs()) return;
+                try (FileWriter w = new FileWriter(f, true)) {
+                    w.write(md5 + "\n");
+                }
+                Log.i("md5 recorded " + (live ? "LIVE" : "static") + ": " + md5);
+            } catch (Throwable t) {
+                Log.i("md5 record error: " + t);
+            }
+        }
     }
 
     private static String magicHex(File f) {
