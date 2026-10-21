@@ -24,13 +24,15 @@ public class StatusActivity extends Activity {
 
     private LinearLayout root;
     private WebView web;
+    private boolean dark;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        dark = ModuleAboutPage.isDark(this);
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.rgb(0x0D, 0x11, 0x17));
+        root.setBackgroundColor(dark ? Color.rgb(0x0D, 0x11, 0x17) : Color.rgb(0xF6, 0xF8, 0xFA));
         setContentView(root);
         showAbout();
     }
@@ -72,6 +74,7 @@ public class StatusActivity extends Activity {
         root.addView(page, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         this.web = page;
+        page.loadDataWithBaseURL(null, ModuleAboutPage.pageHtml(this), "text/html", "utf-8", null);
     }
 
     private void showLogs() {
@@ -87,7 +90,7 @@ public class StatusActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText("LiveXP v" + BuildConfig.VERSION_NAME + " · 运行日志");
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(dark ? Color.WHITE : 0xFF1F2328);
         title.setTextSize(20);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(title, new LinearLayout.LayoutParams(
@@ -95,7 +98,7 @@ public class StatusActivity extends Activity {
 
         TextView subtitle = new TextView(this);
         subtitle.setText("日志由模块在 QQ 进程内写入:/sdcard/Android/data/com.tencent.mobileqq/LiveXP/livexp.log(末尾 200 行)");
-        subtitle.setTextColor(0xFF8A97A8);
+        subtitle.setTextColor(dark ? 0xFF8A97A8 : 0xFF6E7781);
         subtitle.setTextSize(12);
         LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -104,7 +107,7 @@ public class StatusActivity extends Activity {
 
         TextView logView = new TextView(this);
         logView.setTypeface(Typeface.MONOSPACE);
-        logView.setTextColor(0xFFD7E3EE);
+        logView.setTextColor(dark ? 0xFFD7E3EE : 0xFF24292F);
         logView.setTextSize(11);
         String log = readLogTail(200);
         logView.setText(log != null ? log : "无法读取日志文件\n\n该目录只有 QQ 自己能读,本 App 拿不到。\n请打开 QQ → 设置 → LiveXP 模块 → 查看运行日志。");
