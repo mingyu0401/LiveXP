@@ -99,7 +99,8 @@ public final class LivePhotoDetector {
                 boolean exists = f.isFile();
                 long size = f.length();
                 boolean live = exists && size >= MIN_DETECT_BYTES && isMotionPhotoFile(path);
-                pathVerdict.put(path, live);
+                // 文件还没下载到本地时不要缓存结论,等原图落盘后 bind 再触发可重新判定
+                if (exists) pathVerdict.put(path, live);
                 Log.i("live check: " + f.getName() + " exists=" + exists
                         + " size=" + (size / 1024) + "KB -> " + (live ? "LIVE" : "static")
                         + (exists ? " magic=" + magicHex(f) : ""));
@@ -196,17 +197,21 @@ public final class LivePhotoDetector {
     }
 
     private static boolean containsChunked(RandomAccessFile raf, byte[] needle) throws java.io.IOException {
-        int chunk = 1024 * 1024;
         long len = raf.length();
+        int chunk = 1024 * 1024;
         byte[] buf = new byte[chunk];
-        long pos = 0;
-        while (pos < len) {
-            raf.seek(pos);
-            int n = raf.read(buf);
+        int overlap = needle.length - 1;
+        long filePos = 0;
+        int carry = 0;
+        while (filePos < len) {
+            raf.seek(filePos);
+            int n = raf.read(buf, carry, chunk - carry);
             if (n <= 0) break;
-            if (indexOf(buf, 0, n, needle) >= 0) return true;
-            pos += n - needle.length;
-            if (pos < 0) pos = 0;
+            int total = carry + n;
+            if (indexOf(buf, 0, total, needle) >= 0) return true;
+            carry = Math.min(overlap, total);
+            System.arraycopy(buf, total - carry, buf, 0, carry);
+            filePos += n;
         }
         return false;
     }
