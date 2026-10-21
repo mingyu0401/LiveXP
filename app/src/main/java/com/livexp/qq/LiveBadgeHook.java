@@ -131,8 +131,12 @@ public final class LiveBadgeHook {
             return;
         }
         BadgeInjector.hide(root);
-        String path = OpenImageSaver.probeLocalPath(msgItem);
+        String path = LivePhotoDetector.elementPathOf(msgRecord);
+        if (path == null) path = OpenImageSaver.probeLocalPath(msgItem);
         LivePhotoDetector.detectAsync(path, msgRecord, root);
+        // 无论原图是否已落盘都登记候选:首次打开大图时按缩略图矩形匹配,
+        // 后台等原图下载完成后扫描判定,解决"没点开过的图首播失败"
+        LivePhotoDetector.noteCandidateBind(msgRecord, root, path);
     }
 
     /** UI 状态对象 -> AIOMsgItem。方法名被混淆,按返回类型解析:精确 AIOMsgItem 或其基类 msglist.a。 */

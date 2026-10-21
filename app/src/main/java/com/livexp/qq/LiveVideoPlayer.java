@@ -13,19 +13,27 @@ import android.widget.VideoView;
 
 import java.io.File;
 import java.io.RandomAccessFile;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import de.robv.android.xposed.XposedHelpers;
+
 /**
  * 实况图点击播放:点开大图查看器时把内嵌视频提取到缓存并全屏播放一次,
- * 播完移除覆盖层回到照片;查看器右上角留圆形重播按钮,播放中覆盖层盖住查看器按钮。
+ * 播完移除覆盖层回到照片;查看器右上角留实况图标重播按钮,播放中覆盖层盖住查看器按钮。
  * 触发链(QQGalleryActivity onResume 后,GalleryHook 调用):
  * 1. OpenImageSaver 在 getLocalPath 回调发现"已确认实况"时记 pending(聊天图片);
- * 2. 兜底:用 intent 的 KEY_THUMBNAL_BOUND 匹配 bind 时登记的实况气泡拿路径
- *    (群文件图片打开大图不走 getLocalPath)。
+ * 2. 兜底:用 intent 的 KEY_THUMBNAL_BOUND 匹配 bind 时登记的实况气泡或未判定候选
+ *    (群文件图片打开大图不走 getLocalPath;候选的原图未下载,后台轮询等落盘再判);
+ * 3. 左右滑动:hook ViewPager2 翻页 + 查看 RecyclerView adapter 的 onBindViewHolder
+ *    建立页码→消息映射,翻页即判定播放。
  */
 public final class LiveVideoPlayer {
 
@@ -34,6 +42,9 @@ public final class LiveVideoPlayer {
             new File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/video_cache");
 
     private static final ExecutorService EXEC = Executors.newSingleThreadExecutor();
+    private static final ExecutorService RETRY_EXEC = Executors.newSingleThreadExecutor();
+    /** 相册对象图扫描单独一条线程:它耗时长,不能堵住视频提取(EXEC)。 */
+    private static final ExecutorService ALBUM_EXEC = Executors.newSingleThreadExecutor();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private static volatile String pendingPath;
@@ -42,6 +53,23 @@ public final class LiveVideoPlayer {
     private static volatile Activity galleryRef;
     private static View button;
     private static ViewGroup overlay;
+    private static android.widget.VideoView overlayVideo;
+
+    /** 查看器会话内已自动播放过的路径(手动重播不受限);detach 时清空。 */
+    private static final java.util.Set<String> playedPaths = ConcurrentHashMap.newKeySet();
+    /** 当前查看器的 ViewPager2 与 页码→消息/路径 映射。 */
+    private static volatile Object pagerRef;
+    private static volatile Object innerRv;
+    private static volatile java.util.List<String> albumPaths;
+    private static volatile java.util.List<Object> albumRecs;
+    private static volatile java.util.List<Boolean> albumLive;
+    private static volatile java.util.List<String> albumIds;
+    private static volatile int lastSettledPos = -1;
+    private static final Map<Integer, Object> pageRec = new ConcurrentHashMap<>();
+    private static final Map<Integer, String> pagePath = new ConcurrentHashMap<>();
+    private static final java.util.Set<Class<?>> hookedAdapters = ConcurrentHashMap.newKeySet();
+    /** 翻页计数:playWhenReady 等待期间翻页则放弃播放。 */
+    private static volatile int pageSeq;
 
     private LiveVideoPlayer() {}
 
@@ -65,16 +93,20 @@ public final class LiveVideoPlayer {
                 return;
             }
             Log.i("gallery resumed, no pending");
-            String bp = resolveByThumbBound(activity);
-            Log.i("thumb-bound resolve: " + bp);
-            if (bp != null) {
-                currentSrc = bp;
-                installButton(activity);
-                if (!autoPlayed) {
-                    autoPlayed = true;
-                    play(activity, bp);
+            Match m = matchByThumbBound(activity);
+            Log.i("thumb-bound resolve: " + (m == null ? "null"
+                    : "msgId=" + m.msgId + " path=" + m.path + " confirmed=" + m.confirmed));
+            if (m != null) {
+                if (m.confirmed) {
+                    currentSrc = m.path;
+                    installButton(activity);
+                    playAuto(activity, m.path);
+                } else {
+                    playWhenReady(m.msgId, m.path, m.md5);
                 }
             }
+            setupPager(activity);
+            MAIN.postDelayed(() -> dumpGalleryHierarchy(activity), 1200);
         } catch (Throwable t) {
             Log.i("gallery resume error: " + t);
         }
@@ -85,76 +117,829 @@ public final class LiveVideoPlayer {
         galleryRef = null;
         button = null;
         overlay = null;
-        autoPlayed = false;
+        overlayVideo = null;
+        pagerRef = null;
+        innerRv = null;
+        albumPaths = null;
+        albumRecs = null;
+        albumLive = null;
+        albumIds = null;
+        lastSettledPos = -1;
+        pageSeq++;
+        pageRec.clear();
+        pagePath.clear();
+        playedPaths.clear();
     }
 
-    private static volatile boolean autoPlayed;
+    /** thumb-bound 匹配结果。 */
+    static final class Match {
+        final String msgId;
+        final String path;
+        final String md5;
+        final boolean confirmed;
+
+        Match(String msgId, String path, String md5, boolean confirmed) {
+            this.msgId = msgId;
+            this.path = path;
+            this.md5 = md5;
+            this.confirmed = confirmed;
+        }
+    }
 
     /**
      * 用查看器 intent 里的 KEY_THUMBNAL_BOUND(被点缩略图屏幕矩形)与 bind 时登记的
-     * 实况气泡图矩形匹配,反查当前消息的本地路径;只有一条登记时直接采用。
+     * 实况气泡/未判定候选的气泡图矩形匹配,反查当前消息;只有一条登记时直接采用。
      */
-    private static String resolveByThumbBound(Activity activity) {
+    private static Match matchByThumbBound(Activity activity) {
         try {
             android.os.Bundle ex = activity.getIntent() == null ? null : activity.getIntent().getExtras();
             android.graphics.Rect bound = ex == null ? null : (android.graphics.Rect) ex.get("KEY_THUMBNAL_BOUND");
-            String onlyPath = null;
-            int onlyCount = 0;
             if (bound != null) {
-                int[] loc = new int[2];
-                for (java.util.Map.Entry<String, LivePhotoDetector.BindAnchor> e
-                        : LivePhotoDetector.liveBinds.entrySet()) {
-                    if (e.getValue().image == null) continue;
-                    View img = e.getValue().image.get();
-                    if (img == null || img.getWidth() <= 0) continue;
-                    img.getLocationOnScreen(loc);
-                    int cx = loc[0] + img.getWidth() / 2;
-                    int cy = loc[1] + img.getHeight() / 2;
-                    if (bound.contains(cx, cy)) {
-                        Log.i("thumb-bound matched msgId=" + e.getKey());
-                        if (e.getValue().path != null) return e.getValue().path;
-                    }
-                }
+                Match m = matchBoundIn(LivePhotoDetector.liveBinds, bound, true);
+                if (m == null) m = matchBoundIn(LivePhotoDetector.candidates, bound, false);
+                if (m != null) return m;
             }
-            for (LivePhotoDetector.BindAnchor a : LivePhotoDetector.liveBinds.values()) {
-                if (a.path != null) {
-                    onlyPath = a.path;
-                    onlyCount++;
-                }
-            }
-            return onlyCount == 1 ? onlyPath : null;
+            Match only = onlyOne(LivePhotoDetector.liveBinds, true);
+            if (only == null) only = onlyOne(LivePhotoDetector.candidates, false);
+            return only;
         } catch (Throwable t) {
             Log.i("thumb-bound resolve error: " + t);
             return null;
         }
     }
 
+    private static Match matchBoundIn(Map<String, LivePhotoDetector.BindAnchor> map,
+                                      android.graphics.Rect bound, boolean confirmed) {
+        int[] loc = new int[2];
+        for (java.util.Map.Entry<String, LivePhotoDetector.BindAnchor> e : map.entrySet()) {
+            if (e.getValue().image == null || e.getValue().path == null) continue;
+            View img = e.getValue().image.get();
+            if (img == null || img.getWidth() <= 0) continue;
+            img.getLocationOnScreen(loc);
+            int cx = loc[0] + img.getWidth() / 2;
+            int cy = loc[1] + img.getHeight() / 2;
+            if (bound.contains(cx, cy)) {
+                Log.i("thumb-bound matched (" + (confirmed ? "live" : "candidate") + ") msgId=" + e.getKey());
+                return new Match(e.getKey(), e.getValue().path, e.getValue().md5, confirmed);
+            }
+        }
+        return null;
+    }
+
+    private static Match onlyOne(Map<String, LivePhotoDetector.BindAnchor> map, boolean confirmed) {
+        String onlyId = null;
+        String onlyPath = null;
+        String onlyMd5 = null;
+        int onlyCount = 0;
+        for (java.util.Map.Entry<String, LivePhotoDetector.BindAnchor> e : map.entrySet()) {
+            if (e.getValue().path != null) {
+                onlyId = e.getKey();
+                onlyPath = e.getValue().path;
+                onlyMd5 = e.getValue().md5;
+                onlyCount++;
+            }
+        }
+        return onlyCount == 1 ? new Match(onlyId, onlyPath, onlyMd5, confirmed) : null;
+    }
+
+    /**
+     * 候选图打开时原图可能还没下载:后台轮询等落盘,扫描判定后实况才自动播
+     * (静态图记 md5 库2 后不再重扫)。等待期间用户翻页则只入库不再播。
+     */
+    private static void playWhenReady(final String msgId, final String path, final String md5) {
+        playWhenReady(msgId, path, md5, false);
+    }
+
+    /** forceLive=QQ 相册条目已标 isLivePhoto,原图落盘后不用再扫描直接播。 */
+    private static void playWhenReady(final String msgId, final String path, final String md5,
+                                      final boolean forceLive) {
+        if (path == null) return;
+        if (!forceLive && LivePhotoDetector.isKnownStaticMd5(md5)) return;
+        final int seq = pageSeq;
+        Log.i("candidate wait for original: " + path + (forceLive ? " (qq live)" : ""));
+        RETRY_EXEC.execute(() -> {
+            try {
+                for (int i = 0; i < 40; i++) {
+                    Activity act = galleryRef;
+                    if (act == null || act.isFinishing()) return;
+                    File f = new File(path);
+                    if (f.isFile() && f.length() >= LivePhotoDetector.MIN_DETECT_BYTES) {
+                        boolean live = forceLive || LivePhotoDetector.isMotionPhotoFile(path);
+                        Log.i("candidate scanned: " + f.getName() + " -> " + (live ? "LIVE" : "static"));
+                        if (!live) {
+                            LivePhotoDetector.confirmStatic(path, md5);
+                            return;
+                        }
+                        LivePhotoDetector.confirmLive(msgId, path, md5);
+                        MAIN.post(() -> {
+                            Activity a = galleryRef;
+                            if (a == null || a.isFinishing() || seq != pageSeq) return;
+                            currentSrc = path;
+                            installButton(a);
+                            playAuto(a, path);
+                        });
+                        return;
+                    }
+                    Thread.sleep(1500);
+                }
+                Log.i("candidate wait timeout: " + path);
+            } catch (Throwable t) {
+                Log.i("candidate wait error: " + t);
+            }
+        });
+    }
+
+    /** 每次查看器会话每张图只自动播一次;之后靠右上角重播按钮。 */
+    private static void playAuto(Activity act, String path) {
+        if (!playedPaths.add(path)) {
+            Log.i("already auto-played this session: " + path);
+            return;
+        }
+        play(act, path);
+    }
+
+    /** GalleryHook/滚动信号:查看器翻到某一页。 */
+    public static void onGalleryPage(int pos) {
+        try {
+            Activity act = galleryRef;
+            if (act == null || act.isFinishing()) return;
+            if (pos < 0 || pos == lastSettledPos) return;
+            lastSettledPos = pos;
+            pageSeq++;
+            // 翻页立即打断正在播放的视频
+            removeOverlay();
+            PageData d = pageDataAt(pos);
+            Log.i("gallery page selected: pos=" + pos + " path=" + (d == null ? "null" : d.path)
+                    + " msgId=" + (d == null ? "null" : d.mediaId) + " qqLive=" + (d == null ? "-" : d.live));
+            if (d != null && d.path != null) {
+                applyPage(act, d);
+                return;
+            }
+            // 页码映射还没拿到:从当前页 View 的对象图里挖(后台跑,避免主线程反射风暴)
+            removeButton();
+            currentSrc = null;
+            resolvePageFromView(pos);
+        } catch (Throwable t) {
+            Log.i("gallery page error: " + t);
+        }
+    }
+
+    /** 页码→该页数据:先看本会话已解析的,再看相册映射。 */
+    private static PageData pageDataAt(int pos) {
+        PageData d = new PageData();
+        java.util.List<String> paths = albumPaths;
+        java.util.List<Object> recs = albumRecs;
+        java.util.List<Boolean> live = albumLive;
+        java.util.List<String> ids = albumIds;
+        d.path = pagePath.get(pos);
+        d.rec = pageRec.get(pos);
+        if (paths != null && pos < paths.size()) {
+            String p = paths.get(pos);
+            if (p != null && !p.isEmpty()) d.path = p;
+            if (d.rec == null && recs != null && pos < recs.size()) d.rec = recs.get(pos);
+            if (live != null && pos < live.size()) d.live = live.get(pos);
+            if (ids != null && pos < ids.size()) d.mediaId = ids.get(pos);
+        }
+        return (d.path == null && d.rec == null) ? null : d;
+    }
+
+    /** 拿到某页数据后的判定与播放。 */
+    private static void applyPage(Activity act, PageData d) {
+        String path = d.path;
+        String msgId = d.mediaId != null ? d.mediaId
+                : (d.rec == null ? null : LivePhotoDetector.msgIdOf(d.rec));
+        String md5 = d.rec == null ? null : LivePhotoDetector.picMd5Of(d.rec);
+        if (path == null) {
+            removeButton();
+            currentSrc = null;
+            return;
+        }
+        boolean known = (msgId != null && LivePhotoDetector.liveMsgIds.contains(msgId))
+                || LivePhotoDetector.isKnownLiveOpen(path, d.rec);
+        if (known || Boolean.TRUE.equals(d.live)) {
+            currentSrc = path;
+            installButton(act);
+            File f = new File(path);
+            if (f.isFile() && f.length() >= LivePhotoDetector.MIN_DETECT_BYTES) {
+                playAuto(act, path);
+            } else {
+                playWhenReady(msgId, path, md5, true);
+            }
+        } else {
+            currentSrc = null;
+            removeButton();
+            playWhenReady(msgId, path, md5, false);
+        }
+    }
+
+    /** 页码→路径未知时,后台深挖当前居中页 View 的对象图找 MsgRecord 或图片路径。 */
+    private static void resolvePageFromView(final int pos) {
+        final int seq = pageSeq;
+        final View page = centerPageView();
+        if (page == null) return;
+        EXEC.execute(() -> {
+            try {
+                PageData d = readPageData(page);
+                if (d == null || d.path == null) {
+                    Log.i("page view scan empty: pos=" + pos);
+                    return;
+                }
+                Log.i("page view scan: pos=" + pos + " path=" + d.path
+                        + " msgId=" + (d.rec == null ? "null" : LivePhotoDetector.msgIdOf(d.rec)));
+                pagePath.put(pos, d.path);
+                if (d.rec != null) pageRec.put(pos, d.rec);
+                MAIN.post(() -> {
+                    Activity a = galleryRef;
+                    if (a == null || a.isFinishing() || seq != pageSeq || lastSettledPos != pos) return;
+                    applyPage(a, d);
+                });
+            } catch (Throwable t) {
+                Log.i("resolvePageFromView error: " + t);
+            }
+        });
+    }
+
+    /** 当前居中显示的那一页。 */
+    private static View centerPageView() {
+        try {
+            ViewGroup rv = (ViewGroup) innerRv;
+            int n = rv.getChildCount();
+            if (n == 0) return null;
+            int centerX = rv.getWidth() / 2;
+            View best = null;
+            int bestDist = Integer.MAX_VALUE;
+            for (int i = 0; i < n; i++) {
+                View c = rv.getChildAt(i);
+                int dist = Math.abs((c.getLeft() + c.getRight()) / 2 - centerX);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = c;
+                }
+            }
+            return best;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 一页的解析结果:图片路径 + 可选的 MsgRecord + QQ 自己的实况标记与消息 id。 */
+    static final class PageData {
+        String path;
+        Object rec;
+        String mediaId;
+        Boolean live;
+    }
+
+    /**
+     * 在页 View 的对象图里找 MsgRecord(优先,能拿到原图路径与 md5)或看起来是图片路径的字符串。
+     * 反射分配量大,只能在后台线程调用。
+     */
+    private static PageData readPageData(View root) {
+        PageData out = new PageData();
+        java.util.Set<Object> visited =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        java.util.Deque<Object> queue = new java.util.ArrayDeque<>();
+        queue.add(root);
+        visited.add(root);
+        int scanned = 0;
+        while (!queue.isEmpty() && scanned++ < 250) {
+            Object o = queue.poll();
+            if (o.getClass().getSimpleName().equals("RFWLayerItemMediaInfo")) {
+                PageData ed = readElementData(o);
+                if (ed != null && ed.path != null) {
+                    if (ed.rec != null) out.rec = ed.rec;
+                    out.path = ed.path;
+                    out.live = ed.live;
+                    out.mediaId = ed.mediaId;
+                    return out;
+                }
+            }
+            if (out.rec == null && looksLikeMsgRecord(o)) {
+                out.rec = o;
+                String p = LivePhotoDetector.elementPathOf(o);
+                if (p != null) out.path = p;
+            }
+            for (Class<?> c = o.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    Object v;
+                    try {
+                        f.setAccessible(true);
+                        v = f.get(o);
+                    } catch (Throwable ignored) {
+                        continue;
+                    }
+                    if (v == null || !visited.add(v)) continue;
+                    if (v instanceof String) {
+                        String s = (String) v;
+                        if (out.path == null && looksLikePath(s)) out.path = s;
+                        else if (out.path != null && !out.path.contains("chatraw")
+                                && s.contains("chatraw") && looksLikePath(s)) out.path = s;
+                    } else if (v instanceof View) {
+                        queue.add(v);
+                    } else if (out.rec == null && depthOk(v)) {
+                        queue.add(v);
+                    }
+                }
+            }
+        }
+        return (out.path == null && out.rec == null) ? null : out;
+    }
+
+    private static boolean looksLikeMsgRecord(Object o) {
+        if (!o.getClass().getName().contains("MsgRecord")) return false;
+        try {
+            XposedHelpers.getObjectField(o, "msgId");
+            XposedHelpers.getObjectField(o, "elements");
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static void removeButton() {
+        View b = button;
+        button = null;
+        if (b != null && b.getParent() instanceof ViewGroup) {
+            ((ViewGroup) b.getParent()).removeView(b);
+        }
+    }
+
+    static Object currentPager() {
+        return pagerRef;
+    }
+
+    static boolean galleryActive() {
+        return galleryRef != null;
+    }
+
+    /** 每次查看器会话 dump 一次 decor 层级:定位真实的翻页组件与各 RecyclerView 的 adapter。 */
+    private static void dumpGalleryHierarchy(Activity act) {
+        try {
+            if (galleryRef != act) return;
+            StringBuilder sb = new StringBuilder();
+            dumpView((ViewGroup) act.getWindow().getDecorView(), 0, sb, new int[1]);
+            String s = sb.toString();
+            for (int i = 0; i < s.length(); i += 1400) {
+                Log.i("decor dump[" + (i / 1400) + "]: " + s.substring(i, Math.min(s.length(), i + 1400)));
+            }
+        } catch (Throwable t) {
+            Log.i("decor dump error: " + t);
+        }
+    }
+
+    private static void dumpView(View v, int depth, StringBuilder sb, int[] count) {
+        if (depth > 12 || count[0] > 160) return;
+        for (int i = 0; i < depth; i++) sb.append(' ');
+        count[0]++;
+        sb.append(v.getClass().getName());
+        if (v.getClass().getName().contains("RecyclerView")) {
+            try {
+                Object ad = XposedHelpers.callMethod(v, "getAdapter");
+                Object lm = XposedHelpers.callMethod(v, "getLayoutManager");
+                Object cnt = ad == null ? null : XposedHelpers.callMethod(ad, "getItemCount");
+                sb.append(" [adapter=").append(ad == null ? "null" : ad.getClass().getName())
+                        .append(" items=").append(cnt)
+                        .append(" lm=").append(lm == null ? "null" : lm.getClass().getName()).append(']');
+            } catch (Throwable ignored) {
+            }
+        }
+        sb.append('\n');
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) dumpView(g.getChildAt(i), depth + 1, sb, count);
+        }
+    }
+
+    /** 在 decor 里找查看器分页组件:QQ 绕过 ViewPager2 直接驱动内层 RecyclerView,翻页信号要另挂。 */
+    private static void setupPager(Activity act) {
+        try {
+            if (pagerRef != null) return;
+            ViewGroup decor = (ViewGroup) act.getWindow().getDecorView();
+            java.util.List<Object> pagers = new java.util.ArrayList<>();
+            collectViewsOfClass(decor, "androidx.viewpager2.widget.ViewPager2", pagers);
+            if (pagers.isEmpty()) {
+                Log.i("gallery pager not found in decor");
+                return;
+            }
+            pagerRef = pagers.get(0);
+            Object rv = null;
+            for (Field f : pagerRef.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                Object v = f.get(pagerRef);
+                if (v != null && v.getClass().getName().contains("RecyclerView")) {
+                    rv = v;
+                    break;
+                }
+            }
+            if (rv == null) {
+                Log.i("pager inner recycler not found");
+                return;
+            }
+            innerRv = rv;
+            Object adapter = XposedHelpers.callMethod(rv, "getAdapter");
+            int itemCount = adapter == null ? -1 : ((Number) XposedHelpers.callMethod(adapter, "getItemCount")).intValue();
+            int cur = ((Number) XposedHelpers.callMethod(pagerRef, "getCurrentItem")).intValue();
+            lastSettledPos = cur;
+            Log.i("pager state: currentItem=" + cur + " items=" + itemCount);
+            installScrollSignal(rv);
+            final Object adapterF = adapter;
+            final Object pagerF = pagerRef;
+            final int itemF = itemCount;
+            android.os.Bundle ex = act.getIntent() == null ? null : act.getIntent().getExtras();
+            if (ex != null) ex.keySet(); // 主线程先解包,后台线程再读
+            // discoverAlbum 要深挖 QQ 对象图,会触发大量反射分配,主线程跑会 GC 风暴导致 ANR(真机实测);
+            // 也不走 EXEC,避免堵住视频提取。
+            ALBUM_EXEC.execute(() -> discoverAlbum(act, adapterF, pagerF, itemF));
+        } catch (Throwable t) {
+            Log.i("setupPager error: " + t);
+        }
+    }
+
+    /**
+     * 翻页信号:QQ 不走 dispatchOnPageSelected。
+     * 1) scrollToPosition/smoothScrollToPosition(过滤到查看器内层 RecyclerView)直接给出目标页;
+     * 2) 滚动静止时按子 View 中心算当前页兜底(覆盖 fling 滑动)。
+     */
+    private static void installScrollSignal(Object rv) {
+        try {
+            Class<?> rvBase = null;
+            for (Class<?> c = rv.getClass(); c != null; c = c.getSuperclass()) {
+                if ("androidx.recyclerview.widget.RecyclerView".equals(c.getName())) {
+                    rvBase = c;
+                    break;
+                }
+            }
+            if (rvBase == null) {
+                Log.i("RecyclerView base class not found for scroll signal");
+                return;
+            }
+            de.robv.android.xposed.XC_MethodHook signal = new de.robv.android.xposed.XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(de.robv.android.xposed.XC_MethodHook.MethodHookParam param) {
+                    if (param.thisObject != innerRv) return;
+                    Object a0 = param.args != null && param.args.length > 0 ? param.args[0] : null;
+                    if (a0 instanceof Integer) onGalleryPage((Integer) a0);
+                }
+            };
+            de.robv.android.xposed.XposedBridge.hookAllMethods(rvBase, "scrollToPosition", signal);
+            de.robv.android.xposed.XposedBridge.hookAllMethods(rvBase, "smoothScrollToPosition", signal);
+            de.robv.android.xposed.XposedBridge.hookAllMethods(rvBase, "onScrollStateChanged",
+                    new de.robv.android.xposed.XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(
+                                de.robv.android.xposed.XC_MethodHook.MethodHookParam param) {
+                            if (param.thisObject != innerRv) return;
+                            Object st = param.args != null && param.args.length > 0 ? param.args[0] : null;
+                            if (!(st instanceof Integer)) return;
+                            int state = (Integer) st;
+                            // 手指一开始拖动/开始回弹就撤掉播放层,滑动过程连贯(等静止才撤会黑屏闪现)
+                            if (state != 0) {
+                                if (overlay != null) {
+                                    Log.i("drag stops playback: state=" + state);
+                                    removeOverlay();
+                                }
+                                return;
+                            }
+                            int pos = currentPosFromChildren();
+                            if (pos >= 0) onGalleryPage(pos);
+                        }
+                    });
+            Log.i("gallery scroll signal installed on " + rvBase.getName());
+        } catch (Throwable t) {
+            Log.i("installScrollSignal error: " + t);
+        }
+    }
+
+    private static int currentPosFromChildren() {
+        try {
+            ViewGroup rv = (ViewGroup) innerRv;
+            int n = rv.getChildCount();
+            if (n == 0) return -1;
+            int centerX = rv.getWidth() / 2;
+            View best = null;
+            int bestDist = Integer.MAX_VALUE;
+            for (int i = 0; i < n; i++) {
+                View c = rv.getChildAt(i);
+                int dist = Math.abs((c.getLeft() + c.getRight()) / 2 - centerX);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = c;
+                }
+            }
+            if (best == null) return -1;
+            Object pos = XposedHelpers.callMethod(innerRv, "getChildAdapterPosition", best);
+            return pos instanceof Integer ? (Integer) pos : -1;
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /**
+     * 页码→路径映射:QQ 相册数据(各消息图片的 chatimg/chatraw/chatthumb 路径列表)
+     * 藏在查看器 intent extras 或 adapter 对象图里,后台深挖与页数对齐的路径列表。
+     * 只允许在后台线程调用(主线程跑会 GC 风暴 ANR)。
+     */
+    private static void discoverAlbum(Activity act, Object adapter, Object pager, int itemCount) {
+        try {
+            if (albumPaths != null || itemCount <= 0) return;
+            java.util.Set<Object> visited =
+                    java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            java.util.Deque<Object> queue = new java.util.ArrayDeque<>();
+            android.os.Bundle ex =
+                    act.getIntent() == null ? null : act.getIntent().getExtras();
+            if (ex != null) {
+                for (String k : ex.keySet()) {
+                    Object v;
+                    try {
+                        v = ex.get(k);
+                    } catch (Throwable ignored) {
+                        continue;
+                    }
+                    if (v == null) continue;
+                    Log.i("gallery extra: " + k + " = " + v.getClass().getSimpleName()
+                            + (v instanceof java.util.List ? "(size=" + ((java.util.List<?>) v).size() + ")" : ""));
+                    if (v instanceof java.util.List && Math.abs(((java.util.List<?>) v).size() - itemCount) <= 2) {
+                        java.util.List<PageData> pd = pageDataOf((java.util.List<?>) v);
+                        if (pd != null && pd.size() == itemCount) {
+                            Log.i("album elem#0 dump: " + fieldsDump(((java.util.List<?>) v).get(0)));
+                            adoptAlbum(pd);
+                            Log.i("album adopted from extra " + k);
+                            return;
+                        }
+                    }
+                    if (visited.add(v)) queue.add(v);
+                }
+            }
+            if (adapter != null && visited.add(adapter)) queue.add(adapter);
+            if (pager != null && visited.add(pager)) queue.add(pager);
+            int scanned = 0;
+            boolean dumpedElem = false;
+            while (!queue.isEmpty() && albumPaths == null) {
+                Object o = queue.poll();
+                scanned++;
+                if (scanned > 3000) {
+                    Log.i("album scan gave up: scanned=" + scanned);
+                    return;
+                }
+                for (Class<?> c = o.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                    for (Field f : c.getDeclaredFields()) {
+                        if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                        Object v;
+                        try {
+                            f.setAccessible(true);
+                            v = f.get(o);
+                        } catch (Throwable ignored) {
+                            continue;
+                        }
+                        if (v == null || !visited.add(v)) continue;
+                        if (v instanceof java.util.List) {
+                            java.util.List<?> l = (java.util.List<?>) v;
+                            // 只对页数附近的表做逐元素解析,避免全图反射扫描拖慢后台线程
+                            if (Math.abs(l.size() - itemCount) <= 2 && l.size() >= 2) {
+                                java.util.List<PageData> pd = pageDataOf(l);
+                                if (pd != null) {
+                                    Log.i("album list found: size=" + pd.size()
+                                            + " first=" + (pd.get(0) == null ? "null" : pd.get(0).path));
+                                    if (pd.size() == itemCount) {
+                                        Log.i("album elem#0 dump: " + fieldsDump(l.get(0)));
+                                        adoptAlbum(pd);
+                                        Log.i("album adopted: aligned with " + itemCount + " pages");
+                                        return;
+                                    }
+                                } else if (l.size() == itemCount && !dumpedElem) {
+                                    dumpedElem = true;
+                                    Log.i("album elem dump: " + o.getClass().getSimpleName() + "."
+                                            + f.getName() + " -> " + fieldsDump(l.get(0)));
+                                } else {
+                                    Object e0 = l.get(0);
+                                    Log.i("album cand: " + o.getClass().getSimpleName() + "." + f.getName()
+                                            + " size=" + l.size() + " elem="
+                                            + (e0 == null ? "null" : e0.getClass().getName()));
+                                }
+                            }
+                        } else if (depthOk(v)) {
+                            queue.add(v);
+                        }
+                    }
+                }
+            }
+            Log.i("album scan done: scanned=" + scanned + " found=" + (albumPaths != null));
+        } catch (Throwable t) {
+            Log.i("discoverAlbum error: " + t);
+        }
+    }
+
+    private static boolean depthOk(Object v) {
+        String n = v.getClass().getName();
+        return !n.startsWith("android.") && !n.startsWith("androidx.") && !(v instanceof android.view.View)
+                && !(v instanceof android.content.Context) && !(v instanceof Class);
+    }
+
+    /** 多数条目(≥80%)能解析出内容路径才采用;个别页(如视频消息)可以没有路径。 */
+    private static java.util.List<PageData> pageDataOf(java.util.List<?> l) {
+        java.util.List<PageData> out = new java.util.ArrayList<>();
+        int ok = 0;
+        for (Object e : l) {
+            PageData d = readElementData(e);
+            out.add(d);
+            if (d != null && d.path != null) ok++;
+        }
+        return ok * 5 >= l.size() * 4 ? out : null;
+    }
+
+    /**
+     * 单个相册条目:可能是路径字符串,也可能是 RFWLayerItemMediaInfo 这类对象
+     * (路径藏在多层字段里,还可能直接挂着 MsgRecord)。后台调用。
+     * 条目里同时挂着发送者头像等无关路径,按内容度打分取最优。
+     */
+    private static PageData readElementData(Object e) {
+        if (e == null) return null;
+        PageData best = new PageData();
+        if (e instanceof String) {
+            best.path = looksLikePath((String) e) ? (String) e : null;
+            return best;
+        }
+        if (!depthOk(e)) return null;
+        // RFWLayerItemMediaInfo 上 QQ 自己标了是否实况,字段名不混淆,直接采信(只做加速,不做否决)
+        try {
+            Object lp = XposedHelpers.getObjectField(e, "isLivePhoto");
+            if (lp instanceof Boolean) best.live = (Boolean) lp;
+            Object mid = XposedHelpers.getObjectField(e, "_mediaId");
+            if (mid instanceof String) {
+                String s = (String) mid;
+                int i = s.indexOf('_');
+                best.mediaId = i > 0 ? s.substring(0, i) : s;
+            }
+        } catch (Throwable ignored) {
+        }
+        java.util.Set<Object> visited =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        java.util.Deque<Object> queue = new java.util.ArrayDeque<>();
+        queue.add(e);
+        visited.add(e);
+        int scanned = 0;
+        int bestScore = 0;
+        while (!queue.isEmpty() && scanned++ < 80) {
+            Object o = queue.poll();
+            if (best.rec == null && looksLikeMsgRecord(o)) {
+                best.rec = o;
+                String p = LivePhotoDetector.elementPathOf(o);
+                int sc = pathScore(p);
+                if (sc > bestScore) {
+                    bestScore = sc;
+                    best.path = p;
+                }
+            }
+            try {
+                for (Class<?> c = o.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                    for (Field f : c.getDeclaredFields()) {
+                        if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                        Object v;
+                        try {
+                            f.setAccessible(true);
+                            v = f.get(o);
+                        } catch (Throwable ignored) {
+                            continue;
+                        }
+                        if (v == null || !visited.add(v)) continue;
+                        if (v instanceof String) {
+                            String s = (String) v;
+                            int sc = pathScore(s);
+                            if (sc > bestScore) {
+                                bestScore = sc;
+                                best.path = s;
+                            }
+                        } else if (depthOk(v)) {
+                            queue.add(v);
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            if (best.rec != null && bestScore >= 3) break;
+        }
+        return best;
+    }
+
+    /** 路径内容度评分:0=无关(头像/缩略图)或不是路径,越大越像图片正文。 */
+    private static int pathScore(String s) {
+        if (s == null || !looksLikePath(s)) return 0;
+        if (s.contains("/avatar/") || s.contains("/.thumbnails/")) return 0;
+        if (s.contains("chatraw")) return 4;
+        if (s.contains("chatpic")) return 3;
+        if (s.contains("/QQfile_recv/") || s.contains("/Pictures/") || s.contains("/DCIM/")
+                || s.contains("/msfntemp/") || s.contains("nt_image")) return 2;
+        return 1;
+    }
+
+    private static void adoptAlbum(java.util.List<PageData> pd) {
+        java.util.List<String> paths = new java.util.ArrayList<>(pd.size());
+        java.util.List<Object> recs = new java.util.ArrayList<>(pd.size());
+        java.util.List<Boolean> live = new java.util.ArrayList<>(pd.size());
+        java.util.List<String> ids = new java.util.ArrayList<>(pd.size());
+        for (PageData d : pd) {
+            paths.add(d == null ? null : d.path);
+            recs.add(d == null ? null : d.rec);
+            live.add(d == null ? null : d.live);
+            ids.add(d == null ? null : d.mediaId);
+        }
+        albumLive = live;
+        albumIds = ids;
+        albumRecs = recs;
+        albumPaths = paths;
+        applyCurrentPageIfUnknown();
+    }
+
+    /** 相册映射到手后,若当前这一页还没解析出来(打开时 thumb-bound 没匹配上),补一次判定。 */
+    private static void applyCurrentPageIfUnknown() {
+        MAIN.post(() -> {
+            try {
+                Activity a = galleryRef;
+                int pos = lastSettledPos;
+                java.util.List<String> paths = albumPaths;
+                if (a == null || a.isFinishing() || currentSrc != null || pos < 0 || paths == null
+                        || pos >= paths.size()) return;
+                PageData d = pageDataAt(pos);
+                if (d == null || d.path == null) return;
+                Log.i("apply initial page from album: pos=" + pos);
+                applyPage(a, d);
+            } catch (Throwable t) {
+                Log.i("apply initial page error: " + t);
+            }
+        });
+    }
+
+    /** 诊断用:列出对象第一层字段名与看起来像路径/记录的值。 */
+    private static String fieldsDump(Object o) {
+        if (o == null) return "null";
+        StringBuilder sb = new StringBuilder(o.getClass().getSimpleName()).append("{");
+        try {
+            int n = 0;
+            for (Class<?> c = o.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers()) || n++ > 30) continue;
+                    Object v;
+                    try {
+                        f.setAccessible(true);
+                        v = f.get(o);
+                    } catch (Throwable ignored) {
+                        continue;
+                    }
+                    if (v == null) continue;
+                    if (v instanceof String) {
+                        String s = (String) v;
+                        if (s.length() > 90) s = s.substring(0, 90);
+                        if (!s.isEmpty()) sb.append(f.getName()).append("='").append(s).append("' ");
+                    } else if (!(v instanceof android.view.View) && !(v instanceof android.content.Context)) {
+                        sb.append(f.getName()).append('=')
+                                .append(v.getClass().getSimpleName())
+                                .append(v instanceof java.util.List ? "(" + ((java.util.List<?>) v).size() + ")" : "")
+                                .append(' ');
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        String s = sb.append('}').toString();
+        return s.length() > 900 ? s.substring(0, 900) : s;
+    }
+
+    private static void collectViewsOfClass(ViewGroup root, String clsName, java.util.List<Object> out) {
+        if (clsName.equals(root.getClass().getName())) out.add(root);
+        for (int i = 0; i < root.getChildCount(); i++) {
+            View c = root.getChildAt(i);
+            if (clsName.equals(c.getClass().getName())) out.add(c);
+            if (c instanceof ViewGroup) collectViewsOfClass((ViewGroup) c, clsName, out);
+        }
+    }
+
+    private static final int PATH_STRING_MAX = 200;
+
+    private static boolean looksLikePath(String s) {
+        if (s == null || s.isEmpty() || s.length() > PATH_STRING_MAX) return false;
+        return s.startsWith("/storage/") || s.startsWith("/data/user/0/com.tencent.mobileqq/")
+                || s.startsWith("chatpic/") || s.contains("/chatpic/");
+    }
+
     private static void installButton(final Activity activity) {
         if (button != null && button.getParent() != null) return;
         try {
             ViewGroup decor = (ViewGroup) activity.getWindow().getDecorView();
-            final android.widget.TextView tv = new android.widget.TextView(activity);
-            tv.setText("↻");
-            tv.setTextColor(0xFFFFFFFF);
-            tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 20);
-            tv.setGravity(Gravity.CENTER);
-            tv.setAlpha(0.85f);
-            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-            bg.setShape(android.graphics.drawable.GradientDrawable.OVAL);
-            bg.setColor(0x66000000);
-            tv.setBackground(bg);
+            final LiveMarkView mark = new LiveMarkView(activity);
+            mark.setAlpha(0.9f);
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.TOP | Gravity.END);
-            lp.topMargin = px(activity, 42);
-            lp.rightMargin = px(activity, 8);
-            decor.addView(tv, lp);
-            tv.setOnClickListener(v -> {
+                    px(activity, 48), px(activity, 48), Gravity.TOP | Gravity.END);
+            lp.topMargin = px(activity, 38);
+            lp.rightMargin = px(activity, 6);
+            decor.addView(mark, lp);
+            mark.setOnClickListener(v -> {
                 String src = currentSrc;
                 if (src != null) play(activity, src);
             });
-            button = tv;
-            Log.i("replay button installed");
+            button = mark;
+            Log.i("replay button installed (live mark)");
         } catch (Throwable t) {
             Log.i("button install error: " + t);
         }
@@ -190,6 +975,14 @@ public final class LiveVideoPlayer {
             decor.addView(container, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             overlay = container;
+            overlayVideo = video;
+            // 播放中不吞手势:横向滑动可打断播放并翻页,点击落在查看器自身控件上
+            container.setOnTouchListener((v, e) -> false);
+            container.setClickable(false);
+            container.setLongClickable(false);
+            video.setOnTouchListener((v, e) -> false);
+            video.setClickable(false);
+            video.setLongClickable(false);
             // 全屏覆盖层同时盖住查看器自身的按钮(播放中无关按钮隐藏)
             video.setVideoURI(Uri.fromFile(vf));
             video.setOnCompletionListener(mp -> removeOverlay());
@@ -208,6 +1001,14 @@ public final class LiveVideoPlayer {
     private static void removeOverlay() {
         ViewGroup o = overlay;
         overlay = null;
+        android.widget.VideoView vv = overlayVideo;
+        overlayVideo = null;
+        if (vv != null) {
+            try {
+                vv.stopPlayback();
+            } catch (Throwable ignored) {
+            }
+        }
         if (o != null && o.getParent() instanceof ViewGroup) {
             ((ViewGroup) o.getParent()).removeView(o);
         }

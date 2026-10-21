@@ -117,15 +117,20 @@ public final class LivePhotoDetector {
      */
     public static final class BindAnchor {
         public final String path;
+        public final String md5;
         public final java.lang.ref.WeakReference<View> image;
 
-        BindAnchor(String path, View image) {
+        BindAnchor(String path, String md5, View image) {
             this.path = path;
+            this.md5 = md5;
             this.image = image == null ? null : new java.lang.ref.WeakReference<>(image);
         }
     }
 
     public static final Map<String, BindAnchor> liveBinds = new ConcurrentHashMap<>();
+
+    /** 未判定的图片消息 bind 候选:打开大图时缩略图矩形可匹配到它们,后台等原图落盘再判。 */
+    public static final Map<String, BindAnchor> candidates = new ConcurrentHashMap<>();
 
     public static void noteLiveBind(Object msgRecord, ViewGroup root, Object msgItem) {
         String msgId = msgIdOf(msgRecord);
@@ -134,7 +139,34 @@ public final class LivePhotoDetector {
         if (path == null) path = OpenImageSaver.probeLocalPath(msgItem);
         View img = root == null ? null : BadgeInjector.findLargestImageView(root);
         if (liveBinds.size() >= 40) liveBinds.clear();
-        liveBinds.put(msgId, new BindAnchor(path, img));
+        liveBinds.put(msgId, new BindAnchor(path, picMd5Of(msgRecord), img));
+    }
+
+    public static void noteCandidateBind(Object msgRecord, ViewGroup root, String path) {
+        String msgId = msgIdOf(msgRecord);
+        if (msgId == null || liveMsgIds.contains(msgId)) return;
+        View img = root == null ? null : BadgeInjector.findLargestImageView(root);
+        if (candidates.size() >= 40) candidates.clear();
+        candidates.put(msgId, new BindAnchor(path, picMd5Of(msgRecord), img));
+    }
+
+    /** 扫描/轮询确认实况后统一登记:liveMsgIds + 路径缓存 + md5 库1。 */
+    public static void confirmLive(String msgId, String path, String md5) {
+        if (msgId != null) liveMsgIds.add(msgId);
+        if (path != null) pathVerdict.put(path, Boolean.TRUE);
+        recordMd5(md5, true);
+        Log.i("live confirmed: " + msgId + " path=" + path);
+    }
+
+    /** 扫描确认非实况:记路径缓存 + md5 库2,避免重复扫描。 */
+    public static void confirmStatic(String path, String md5) {
+        if (path != null) pathVerdict.put(path, Boolean.FALSE);
+        recordMd5(md5, false);
+    }
+
+    public static boolean isKnownStaticMd5(String md5) {
+        ensureMd5Loaded();
+        return md5 != null && md5Static.contains(md5);
     }
 
     /** 从 MsgRecord 的 FileElement.filePath / PicElement.sourcePath 取本地路径,取不到返回 null。 */
@@ -197,6 +229,7 @@ public final class LivePhotoDetector {
         }
         java.lang.ref.WeakReference<ViewGroup> rootRef =
                 boundRoot == null ? null : new java.lang.ref.WeakReference<>(boundRoot);
+        final String msgId = msgIdOf(msgRecord);
         SCAN_EXEC.execute(() -> {
             try {
                 File f = new File(path);
@@ -212,6 +245,14 @@ public final class LivePhotoDetector {
                 if (live) {
                     liveHitCount++;
                     Log.i("live photo detected: " + path);
+                    // 提升候选登记为实况登记,大图查看器缩略图匹配才能命中未点开过的图
+                    if (msgId != null) {
+                        BindAnchor cand = candidates.remove(msgId);
+                        if (cand != null) {
+                            if (liveBinds.size() >= 40) liveBinds.clear();
+                            liveBinds.put(msgId, cand);
+                        }
+                    }
                     onLive(msgRecord, rootRef == null ? null : rootRef.get());
                 }
             } catch (Throwable t) {

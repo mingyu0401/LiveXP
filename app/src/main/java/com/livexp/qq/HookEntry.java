@@ -7,11 +7,14 @@ public class HookEntry implements IXposedHookLoadPackage {
 
     private static final String QQ_PACKAGE = "com.tencent.mobileqq";
     static final String TAG = "LiveXP";
+    /** base.apk 加载器(androidx 等库类可能在这里,热更加载器找不到时兜底)。 */
+    static volatile ClassLoader baseCl;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
         if (!QQ_PACKAGE.equals(lpparam.packageName)) return;
         if (!QQ_PACKAGE.equals(lpparam.processName)) return;
+        baseCl = lpparam.classLoader;
         Log.init();
         Log.i("module loaded, version " + BuildConfig.VERSION_NAME);
         try {
