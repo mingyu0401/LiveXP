@@ -23,7 +23,9 @@ import java.util.ArrayDeque;
 /** LiveXP 独立状态页:显示模块运行日志末尾内容。 */
 public class StatusActivity extends Activity {
 
-    private static final File LOG_FILE = new File("/sdcard/Download/LiveXP/livexp.log");
+    // 注意:模块自身进程读不了 QQ 的 Android/data,这里保留入口但多半会显示提示;
+    // 看日志请用 QQ 设置页的 LiveXP 胶囊弹窗(QQ 进程内可读自己的数据目录)。
+    private static final File LOG_FILE = new File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/livexp.log");
 
     private LinearLayout container;
     private TextView logView;

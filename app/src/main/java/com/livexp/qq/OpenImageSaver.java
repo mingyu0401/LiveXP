@@ -19,7 +19,7 @@ import de.robv.android.xposed.XposedHelpers;
  * (QAuxiliary PicCopyToClipboard 的 NT 实现同款)。
  * QQ 每次查路径(气泡绑定、打开大图)都会经过这里:
  *  - 路径记日志,学习接收方图片的落盘命名规则;
- *  - 文件大于 512KB(原图量级)时拷贝到 /sdcard/Download/LiveXP/opens/ 留档。
+ *  - 文件大于 512KB(原图量级)时拷贝到 opens/ 留档(模块文件夹在 QQ 数据目录下)。
  */
 public final class OpenImageSaver {
 
@@ -32,6 +32,7 @@ public final class OpenImageSaver {
     private static final Set<String> loggedPaths = ConcurrentHashMap.newKeySet();
     private static final ExecutorService EXEC = Executors.newSingleThreadExecutor();
     private static volatile Method probeMethod;
+    private static volatile Object probeInstance;
 
     private OpenImageSaver() {}
 
@@ -47,6 +48,7 @@ public final class OpenImageSaver {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     try {
+                        if (param.thisObject != null) probeInstance = param.thisObject;
                         Object r = param.getResult();
                         if (!(r instanceof String) || ((String) r).isEmpty()) return;
                         String path = (String) r;
@@ -77,7 +79,9 @@ public final class OpenImageSaver {
         try {
             Method m = probeMethod;
             if (m == null || msgItem == null) return null;
-            Object r = m.invoke(m.getDeclaringClass().newInstance(), msgItem);
+            Object owner = probeInstance;
+            if (owner == null) owner = m.getDeclaringClass().newInstance();
+            Object r = m.invoke(owner, msgItem);
             if (!(r instanceof String) || ((String) r).isEmpty()) return null;
             String path = (String) r;
             if (loggedPaths.add(path)) {
@@ -85,7 +89,8 @@ public final class OpenImageSaver {
             }
             saveIfLarge(path);
             return path;
-        } catch (Throwable ignored) {
+        } catch (Throwable t) {
+            Log.i("probe error: " + t);
             return null;
         }
     }

@@ -95,8 +95,14 @@ public final class LivePhotoDetector {
                 boundRoot == null ? null : new java.lang.ref.WeakReference<>(boundRoot);
         SCAN_EXEC.execute(() -> {
             try {
-                boolean live = isLiveFile(path);
+                File f = new File(path);
+                boolean exists = f.isFile();
+                long size = f.length();
+                boolean live = exists && size >= MIN_DETECT_BYTES && isMotionPhotoFile(path);
                 pathVerdict.put(path, live);
+                Log.i("live check: " + f.getName() + " exists=" + exists
+                        + " size=" + (size / 1024) + "KB -> " + (live ? "LIVE" : "static")
+                        + (exists ? " magic=" + magicHex(f) : ""));
                 if (live) {
                     liveHitCount++;
                     Log.i("live photo detected: " + path);
@@ -106,6 +112,18 @@ public final class LivePhotoDetector {
                 Log.i("detect error: " + t);
             }
         });
+    }
+
+    private static String magicHex(File f) {
+        try (RandomAccessFile raf = new RandomAccessFile(f, "r")) {
+            byte[] b = new byte[12];
+            int n = raf.read(b);
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < n; i++) sb.append(String.format("%02x", b[i]));
+            return sb.toString();
+        } catch (Throwable t) {
+            return "?";
+        }
     }
 
     private static void onLive(Object msgRecord, ViewGroup boundRoot) {

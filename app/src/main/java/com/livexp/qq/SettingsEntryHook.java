@@ -504,7 +504,7 @@ public final class SettingsEntryHook {
     }
 
     private static String readLogTail(int maxLines) {
-        java.io.File f = new java.io.File("/sdcard/Download/LiveXP/livexp.log");
+        java.io.File f = new java.io.File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/livexp.log");
         try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(f))) {
             ArrayDeque<String> lines = new ArrayDeque<>();
             String line;
