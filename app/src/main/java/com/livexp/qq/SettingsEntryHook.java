@@ -1,17 +1,7 @@
 package com.livexp.qq;
 
-import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
-import android.graphics.Color;
-import android.graphics.drawable.GradientDrawable;
-import android.os.Handler;
-import android.os.Looper;
-import android.util.TypedValue;
-import android.view.Gravity;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -45,10 +35,7 @@ public final class SettingsEntryHook {
     private static final String[] PROVIDER_NAMES = {
             "MainSettingConfigProvider", "NewSettingConfigProvider", "b"
     };
-    private static final int ENTRY_ITEM_ID = 0x7e0b1e04;
 
-    private static final Set<String> hookedPageClasses = new CopyOnWriteArraySet<>();
-    private static final Set<String> seenClasses = new CopyOnWriteArraySet<>();
     private static final Set<Method> hookedMethods = new CopyOnWriteArraySet<>();
 
     private static volatile Constructor<?> itemCtor;
@@ -82,11 +69,6 @@ public final class SettingsEntryHook {
             enumerateProviderSubclasses(cl);
         } catch (Throwable t) {
             Log.i("provider scan failed: " + t);
-        }
-        try {
-            installFragmentFallback(cl);
-        } catch (Throwable t) {
-            Log.i("fragment fallback failed: " + t);
         }
     }
 
@@ -134,7 +116,6 @@ public final class SettingsEntryHook {
                 protected void afterHookedMethod(MethodHookParam param) {
                     try {
                         Class<?> actual = param.thisObject.getClass();
-                        if (!seenClasses.add("provider:" + actual.getName())) return;
                         Log.i("config provider constructed: " + actual.getName());
                         for (Class<?> c = actual; c != null && c != Object.class; c = c.getSuperclass()) {
                             for (Method m : c.getDeclaredMethods()) {
@@ -167,203 +148,10 @@ public final class SettingsEntryHook {
         Log.i("settings list hooked: " + m.getDeclaringClass().getName() + "." + m.getName());
     }
 
-    /**
-     * 兜底:hook Instrumentation.callActivityOnCreate —— 所有 Activity 创建必经的总入口,
-     * 不受子类重写影响。记录全部 Activity 类名用于发现真实的设置页类;
-     * 类名含 etting 直接注入悬浮入口。Fragment 构造函数探针同理记录类名。
-     */
-    private static void installFragmentFallback(ClassLoader cl) {
-        tryHookPageClass(cl, "com.tencent.mobileqq.setting.main.MainSettingFragment");
-        probeConstructors(cl, "androidx.fragment.app.Fragment");
-        monitorActivities(cl);
-    }
-
-    private static void monitorActivities(ClassLoader cl) {
-        try {
-            Class<?> instr = XposedHelpers.findClass("android.app.Instrumentation", cl);
-            int hooked = 0;
-            for (Method m : instr.getDeclaredMethods()) {
-                if (!"callActivityOnCreate".equals(m.getName())) continue;
-                XposedBridge.hookMethod(m, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            Activity activity = (Activity) param.args[0];
-                            String name = activity.getClass().getName();
-                            if (seenClasses.add(name)) {
-                                Log.i("activity created: " + name);
-                            }
-                            // QQ 9.3.70 设置页是通用容器 QPublicFragmentActivity,靠标题识别
-                            if ("com.tencent.mobileqq.activity.QPublicFragmentActivity".equals(name)) {
-                                scheduleSettingsCheck(activity);
-                            }
-                        } catch (Throwable t) {
-                            Log.i("activity monitor error: " + t);
-                        }
-                    }
-                });
-                hooked++;
-            }
-            Log.i("activity monitor hooked: " + hooked + " callActivityOnCreate");
-        } catch (Throwable t) {
-            Log.i("activity monitor failed: " + t);
-        }
-    }
-
-    /** 标题要等 Fragment 加载完才设置,分几次延迟检查。 */
-    private static void scheduleSettingsCheck(Activity activity) {
-        Handler handler = new Handler(Looper.getMainLooper());
-        long[] delays = {500, 1500, 3000};
-        for (long delay : delays) {
-            handler.postDelayed(() -> {
-                try {
-                    if (activity.isFinishing() || activity.isDestroyed()) return;
-                    CharSequence title = activity.getTitle();
-                    if (title != null && title.toString().contains("设置")) {
-                        injectPill(activity);
-                        Log.i("settings pill injected into QQ settings page (title=" + title + ")");
-                    }
-                } catch (Throwable t) {
-                    Log.i("settings check error: " + t);
-                }
-            }, delay);
-        }
-    }
-
-    private static void probeConstructors(ClassLoader cl, String baseName) {
-        try {
-            Class<?> base = XposedHelpers.findClass(baseName, cl);
-            Constructor<?>[] ctors = base.getDeclaredConstructors();
-            for (Constructor<?> ctor : ctors) {
-                XposedBridge.hookMethod(ctor, new XC_MethodHook() {
-                    @Override
-                    protected void afterHookedMethod(MethodHookParam param) {
-                        try {
-                            onPageInstanceConstructed(param.thisObject);
-                        } catch (Throwable t) {
-                            Log.i("ctor probe error: " + t);
-                        }
-                    }
-                });
-            }
-            Log.i("ctor probe hooked: " + baseName + " (" + ctors.length + " ctors)");
-        } catch (Throwable t) {
-            Log.i("ctor probe failed: " + baseName + ": " + t);
-        }
-    }
-
-    private static void onPageInstanceConstructed(Object obj) {
-        String name = obj.getClass().getName();
-        if (!name.startsWith("com.tencent.mobileqq")) return;
-        // 只记录类名用于发现真实页面类,不再按 "etting" 启发式注入:
-        // 群资料页 TroopSettingFragmentV2 等类名也会命中,且兜底会错误 hook 到
-        // androidx 基类方法,导致胶囊出现在所有 QQ 界面。
-        if (seenClasses.add(name) && seenClasses.size() <= 300) {
-            Log.i("fragment constructed: " + name);
-        }
-    }
-
-    private static void tryHookPageClass(ClassLoader cl, String className) {
-        Class<?> cls = XposedHelpers.findClassIfExists(className, cl);
-        if (cls == null) {
-            Log.i("settings page class not found: " + className);
-            return;
-        }
-        hookedPageClasses.add(className);
-        if (!hookLifecycle(cls)) {
-            Log.i("no lifecycle method found on " + className);
-        }
-    }
-
-    private static boolean hookLifecycle(Class<?> cls) {
-        final boolean isActivity = Activity.class.isAssignableFrom(cls);
-        String[][] candidates = isActivity
-                ? new String[][]{{"onResume", "0"}, {"doOnCreate", "1"}, {"onPostCreate", "1"}, {"onCreate", "1"}}
-                : new String[][]{{"onViewCreated", "2"}, {"onResume", "0"}, {"onCreateView", "3"}};
-        for (String[] cand : candidates) {
-            final Method m = findMostDerived(cls, cand[0], Integer.parseInt(cand[1]));
-            if (m == null) continue;
-            // 找到的声明落到了 androidx/android 框架基类上说明目标类自身没有重写,
-            // hook 它会拦住所有 Fragment/Activity,绝不能装。
-            String decl = m.getDeclaringClass().getName();
-            if (decl.startsWith("android.") || decl.startsWith("androidx.")) continue;
-            XposedBridge.hookMethod(m, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    try {
-                        Object activity = isActivity ? param.thisObject
-                                : XposedHelpers.callMethod(param.thisObject, "getActivity");
-                        if (!(activity instanceof Activity)) return;
-                        injectPill((Activity) activity);
-                        Log.i("settings pill injected via "
-                                + m.getDeclaringClass().getName() + "." + m.getName());
-                    } catch (Throwable t) {
-                        Log.i("settings pill error: " + t);
-                    }
-                }
-            });
-            Log.i("settings page hooked: " + m.getDeclaringClass().getName() + "." + m.getName()
-                    + " (for " + cls.getName() + ")");
-            return true;
-        }
-        return false;
-    }
-
-    /** 从 cls 沿继承链向上找 name/paramCount 匹配的最派生声明(虚拟分发实际执行的就是它)。 */
-    private static Method findMostDerived(Class<?> cls, String name, int paramCount) {
-        for (Class<?> c = cls; c != null; c = c.getSuperclass()) {
-            for (Method m : c.getDeclaredMethods()) {
-                if (name.equals(m.getName()) && m.getParameterTypes().length == paramCount) {
-                    return m;
-                }
-            }
-        }
-        return null;
-    }
-
-    private static void injectPill(Activity activity) {
-        View content = activity.findViewById(android.R.id.content);
-        if (!(content instanceof ViewGroup)) return;
-        ViewGroup root = (ViewGroup) content;
-        if (root.findViewById(ENTRY_ITEM_ID) != null) return;
-
-        TextView pill = new TextView(activity);
-        pill.setId(ENTRY_ITEM_ID);
-        pill.setText("✔ LiveXP 已加载 · 点击查看状态");
-        pill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        pill.setTextColor(Color.WHITE);
-        int padH = dp(activity, 14);
-        int padV = dp(activity, 8);
-        pill.setPadding(padH, padV, padH, padV);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xCC2E7D32);
-        bg.setCornerRadius(dp(activity, 18));
-        pill.setBackground(bg);
-        pill.setOnClickListener(v -> {
-            Log.i("pill clicked");
-            onEntryClick(activity);
-        });
-
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        lp.bottomMargin = dp(activity, 64);
-        root.addView(pill, lp);
-    }
-
-    private static int dp(Context ctx, float value) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value,
-                ctx.getResources().getDisplayMetrics());
-    }
-
     private static final XC_MethodHook listAppender = new XC_MethodHook() {
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
             try {
-                Object r = param.getResult();
-                Log.i("provider method invoked: " + param.method.getDeclaringClass().getName()
-                        + "." + param.method.getName() + ", result="
-                        + (r instanceof List ? "List(" + ((List<?>) r).size() + ")" : String.valueOf(r)));
                 appendEntry(param);
             } catch (Throwable t) {
                 Log.i("settings entry append error: " + t);
@@ -521,10 +309,14 @@ public final class SettingsEntryHook {
         }
     }
 
+    /** 入口点击:进模块关于二级页(炫彩 GitHub 图标 + 简介 + 链接)。 */
     private static void onEntryClick(Context ctx) {
-        Log.i("entry clicked, showing status panel");
-        // QQ 有防劫持机制,会静默拦截跨应用 startActivity(QFun 靠 Parasitics 桩 Activity 绕过,太重),
-        // 所以在 QQ 进程内直接弹自己的深色日志面板。
+        Log.i("entry clicked, opening about page");
+        ModuleAboutPage.showDialog(ctx, () -> showLogPanel(ctx));
+    }
+
+    /** 关于页底部的「查看运行日志」入口(原日志面板保留)。 */
+    private static void showLogPanel(Context ctx) {
         try {
             TextView logView = new TextView(ctx);
             logView.setTypeface(Typeface.MONOSPACE);
@@ -553,27 +345,9 @@ public final class SettingsEntryHook {
                     .setView(scroll)
                     .setPositiveButton("关闭", null)
                     .show();
-            return;
         } catch (Throwable t) {
-            Log.i("status panel failed: " + t);
-        }
-        String msg = "版本: " + BuildConfig.VERSION_NAME + "\n"
-                + "hook 方法: " + LiveBadgeHook.hookedTarget + "\n"
-                + "hostView 解析: " + (LiveBadgeHook.hostViewResolved ? "成功" : "失败") + "\n"
-                + "msgItem 解析: " + LiveBadgeHook.msgItemMethod + "\n"
-                + "气泡绑定次数: " + LiveBadgeHook.boundCount + "\n"
-                + "已判定实况消息数: " + LivePhotoDetector.liveMsgIds.size() + "\n"
-                + "实况图命中数: " + LivePhotoDetector.liveHitCount + "\n"
-                + "md5 库(实况): " + LivePhotoDetector.md5LiveCount() + " 条\n"
-                + "md5 库(非实况): " + LivePhotoDetector.md5StaticCount() + " 条";
-        try {
-            new AlertDialog.Builder(ctx)
-                    .setTitle("LiveXP 状态")
-                    .setMessage(msg)
-                    .setPositiveButton("好", null)
-                    .show();
-        } catch (Throwable t) {
-            Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show();
+            Log.i("log panel failed: " + t);
+            Toast.makeText(ctx, "日志读取失败: " + t, Toast.LENGTH_SHORT).show();
         }
     }
 }
