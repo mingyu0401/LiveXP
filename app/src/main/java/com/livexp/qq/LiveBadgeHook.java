@@ -120,12 +120,14 @@ public final class LiveBadgeHook {
         String msgId = LivePhotoDetector.msgIdOf(msgRecord);
         if (msgId != null && LivePhotoDetector.liveMsgIds.contains(msgId)) {
             BadgeInjector.show(root);
+            LivePhotoDetector.noteLiveBind(msgRecord, root, msgItem);
             return;
         }
         // md5 库1快速路径:实况 md5 已持久化,无需扫描直接打标
         if (LivePhotoDetector.isKnownLiveMd5(msgRecord)) {
             if (msgId != null) LivePhotoDetector.liveMsgIds.add(msgId);
             BadgeInjector.show(root);
+            LivePhotoDetector.noteLiveBind(msgRecord, root, msgItem);
             return;
         }
         BadgeInjector.hide(root);

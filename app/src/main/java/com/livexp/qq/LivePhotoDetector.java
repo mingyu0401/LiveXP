@@ -2,6 +2,7 @@ package com.livexp.qq;
 
 import android.os.Handler;
 import android.os.Looper;
+import android.view.View;
 import android.view.ViewGroup;
 
 import java.io.BufferedReader;
@@ -110,6 +111,67 @@ public final class LivePhotoDetector {
     }
 
     /**
+     * bind 时已确认实况的消息登记:msgId -> 本地路径 + 气泡内消息图 View 弱引用。
+     * 打开大图查看器时用 intent 里的缩略图矩形匹配气泡,反查当前消息的本地路径
+     * (群文件图片打开大图不走 AIOMsgItemApiImpl.getLocalPath,这是唯一可靠回查)。
+     */
+    public static final class BindAnchor {
+        public final String path;
+        public final java.lang.ref.WeakReference<View> image;
+
+        BindAnchor(String path, View image) {
+            this.path = path;
+            this.image = image == null ? null : new java.lang.ref.WeakReference<>(image);
+        }
+    }
+
+    public static final Map<String, BindAnchor> liveBinds = new ConcurrentHashMap<>();
+
+    public static void noteLiveBind(Object msgRecord, ViewGroup root, Object msgItem) {
+        String msgId = msgIdOf(msgRecord);
+        if (msgId == null) return;
+        String path = elementPathOf(msgRecord);
+        if (path == null) path = OpenImageSaver.probeLocalPath(msgItem);
+        View img = root == null ? null : BadgeInjector.findLargestImageView(root);
+        if (liveBinds.size() >= 40) liveBinds.clear();
+        liveBinds.put(msgId, new BindAnchor(path, img));
+    }
+
+    /** 从 MsgRecord 的 FileElement.filePath / PicElement.sourcePath 取本地路径,取不到返回 null。 */
+    public static String elementPathOf(Object msgRecord) {
+        if (msgRecord == null) return null;
+        try {
+            Object elements = XposedHelpers.getObjectField(msgRecord, "elements");
+            if (!(elements instanceof List)) return null;
+            for (Object element : (List<?>) elements) {
+                if (element == null) continue;
+                Object pic;
+                try {
+                    pic = XposedHelpers.getObjectField(element, "picElement");
+                } catch (Throwable ignored) {
+                    pic = null;
+                }
+                if (pic != null) {
+                    Object sp = XposedHelpers.getObjectField(pic, "sourcePath");
+                    return sp instanceof String && !((String) sp).isEmpty() ? (String) sp : null;
+                }
+                Object file;
+                try {
+                    file = XposedHelpers.getObjectField(element, "fileElement");
+                } catch (Throwable ignored) {
+                    file = null;
+                }
+                if (file != null) {
+                    Object fp = XposedHelpers.getObjectField(file, "filePath");
+                    if (fp instanceof String && !((String) fp).isEmpty()) return (String) fp;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /**
      * 异步判定一个本地文件是否实况(>=1MB 且含动态照片特征)。
      * 命中后把消息 msgId 记入 liveMsgIds;若气泡还活着,直接在主线程补打标。
      */
@@ -173,6 +235,13 @@ public final class LivePhotoDetector {
         ensureMd5Loaded();
         String md5 = picMd5Of(msgRecord);
         return md5 != null && md5Live.contains(md5);
+    }
+
+    /** 打开大图时判断是否已确认的实况图(路径判定缓存或 md5 库1)。 */
+    public static boolean isKnownLiveOpen(String path, Object msgRecord) {
+        Boolean v = path == null ? null : pathVerdict.get(path);
+        if (v != null) return v;
+        return isKnownLiveMd5(msgRecord);
     }
 
     /** 从 MsgRecord 的 PicElement(或群文件 FileElement)里取内容 md5(跨重启/跨设备稳定),小写,取不到返回 null。 */

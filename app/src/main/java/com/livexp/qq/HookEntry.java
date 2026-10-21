@@ -42,6 +42,11 @@ public class HookEntry implements IXposedHookLoadPackage {
             Log.i("open-saver install failed: " + t);
         }
         try {
+            GalleryHook.install(realCl);
+        } catch (Throwable t) {
+            Log.i("gallery hook failed: " + t);
+        }
+        try {
             SettingsEntryHook.install(realCl);
         } catch (Throwable t) {
             Log.i("settings entry failed: " + t);

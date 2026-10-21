@@ -62,7 +62,7 @@ public final class BadgeInjector {
     }
 
     /** 气泡根布局里头像和消息图都是 ImageView;实况标要贴在消息图上,取面积最大的那个。 */
-    private static View findLargestImageView(ViewGroup group) {
+    public static View findLargestImageView(ViewGroup group) {
         View best = null;
         long bestArea = -1;
         for (int i = 0; i < group.getChildCount(); i++) {

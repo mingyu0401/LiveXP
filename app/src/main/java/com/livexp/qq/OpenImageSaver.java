@@ -22,6 +22,8 @@ public final class OpenImageSaver {
     private static final Set<String> loggedPaths = ConcurrentHashMap.newKeySet();
     private static volatile Method probeMethod;
     private static volatile Object probeInstance;
+    /** probeLocalPath 主动反射调用也会走 hook,用该标记避免把 bind 误当成"用户点开了图片"。 */
+    private static volatile boolean probing;
 
     private OpenImageSaver() {}
 
@@ -45,6 +47,9 @@ public final class OpenImageSaver {
                             Log.i("getLocalPath -> " + path);
                         }
                         LivePhotoDetector.detectAsync(path, msgRecordOf(param.args), null);
+                        if (!probing && LivePhotoDetector.isKnownLiveOpen(path, msgRecordOf(param.args))) {
+                            LiveVideoPlayer.noteLiveOpen(path);
+                        }
                     } catch (Throwable t) {
                         Log.i("open-saver hook error: " + t);
                     }
@@ -69,7 +74,13 @@ public final class OpenImageSaver {
             if (m == null || msgItem == null) return null;
             Object owner = probeInstance;
             if (owner == null) owner = m.getDeclaringClass().newInstance();
-            Object r = m.invoke(owner, msgItem);
+            Object r;
+            probing = true;
+            try {
+                r = m.invoke(owner, msgItem);
+            } finally {
+                probing = false;
+            }
             if (!(r instanceof String) || ((String) r).isEmpty()) return null;
             String path = (String) r;
             if (loggedPaths.add(path)) {
