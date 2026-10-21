@@ -58,7 +58,17 @@ public class StatusActivity extends Activity {
             web = null;
         }
         root.removeAllViews();
-        WebView page = ModuleAboutPage.createWebView(this, this::showLogs);
+        WebView page = ModuleAboutPage.createWebView(this, new ModuleAboutPage.Actions() {
+            @Override
+            public void openLogs() {
+                showLogs();
+            }
+
+            @Override
+            public void openSupport() {
+                ModuleAboutPage.showSupportDialog(StatusActivity.this);
+            }
+        });
         root.addView(page, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         this.web = page;

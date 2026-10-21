@@ -12,21 +12,23 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 
-/**
- * 模块关于页:炫彩 GitHub 图标 + 模块简介 + 源码/主页/联系邮箱。
- * QQ 进程里弹全屏 Dialog(QQ 防劫持,跳转独立 Activity 会被静默拦截);
- * 独立 App(StatusActivity)直接 setContentView 同一页面。
- */
+/** 模块关于页:炫彩图标 + 简介 + 复制/支持作者卡片。QQ 进程弹全屏 Dialog,独立 App 直接 setContentView。 */
 public final class ModuleAboutPage {
 
-    /** 二级页里点「查看运行日志」时的回调。 */
-    public interface LogsOpener {
+    /** 页面动作回调。 */
+    public interface Actions {
         void openLogs();
+
+        void openSupport();
     }
 
     private ModuleAboutPage() {}
 
-    public static WebView createWebView(Context ctx, LogsOpener opener) {
+    public static WebView createWebView(Context ctx, Actions actions) {
+        return createWebView(ctx, actions, null);
+    }
+
+    private static WebView createWebView(Context ctx, Actions actions, Dialog self) {
         WebView web = new WebView(ctx);
         web.setBackgroundColor(Color.rgb(0x0D, 0x11, 0x17));
         web.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
@@ -44,6 +46,12 @@ public final class ModuleAboutPage {
                             cm.setPrimaryClip(android.content.ClipData.newPlainText("LiveXP", text));
                             Toast.makeText(ctx, "已复制 " + text, Toast.LENGTH_SHORT).show();
                         }
+                        if ("1".equals(u.getQueryParameter("open"))) {
+                            try {
+                                ctx.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(text)));
+                            } catch (Throwable ignored) {
+                            }
+                        }
                     }
                     if (mailto != null && !mailto.isEmpty()) {
                         try {
@@ -54,20 +62,29 @@ public final class ModuleAboutPage {
                     return true;
                 }
                 if (url.startsWith("livexp://logs")) {
-                    if (opener != null) opener.openLogs();
+                    if (actions != null) actions.openLogs();
+                    return true;
+                }
+                if (url.startsWith("livexp://support")) {
+                    if (actions != null) actions.openSupport();
+                    return true;
+                }
+                if (url.startsWith("livexp://close")) {
+                    if (self != null) self.dismiss();
                     return true;
                 }
                 return true;
             }
         });
-        web.loadDataWithBaseURL(null, html(), "text/html", "utf-8", null);
         return web;
     }
 
-    public static Dialog showDialog(Context ctx, LogsOpener opener) {
+    public static Dialog showDialog(Context ctx, Actions actions) {
         Dialog dialog = new Dialog(ctx);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        dialog.setContentView(createWebView(ctx, opener), new ViewGroup.LayoutParams(
+        WebView web = createWebView(ctx, actions);
+        web.loadDataWithBaseURL(null, html(), "text/html", "utf-8", null);
+        dialog.setContentView(web, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         Window w = dialog.getWindow();
         if (w != null) {
@@ -78,22 +95,56 @@ public final class ModuleAboutPage {
         return dialog;
     }
 
+    public static Dialog showSupportDialog(Context ctx) {
+        Dialog dialog = new Dialog(ctx);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        WebView web = createWebView(ctx, null, dialog);
+        web.loadDataWithBaseURL(null, supportHtml(), "text/html", "utf-8", null);
+        dialog.setContentView(web, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        Window w = dialog.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new ColorDrawable(0xB3000000));
+            w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        }
+        dialog.show();
+        return dialog;
+    }
+
+    private static String markSvg() {
+        // 图案结构:20 点圆环 + 实心圆环 + 中心圆盘(参考作者提供的白色抠图)
+        StringBuilder dots = new StringBuilder();
+        for (int i = 0; i < 20; i++) {
+            double a = Math.PI * 2 * i / 20;
+            double x = 84 * Math.cos(a);
+            double y = 84 * Math.sin(a);
+            dots.append("<circle cx='").append(String.format("%.1f", x))
+                    .append("' cy='").append(String.format("%.1f", y))
+                    .append("' r='9' fill='url(#g)'/>");
+        }
+        return "<svg width='83' height='83' viewBox='-100 -100 200 200' style='animation:glow 3s ease-in-out infinite alternate'>"
+                + "<defs><linearGradient id='g' x1='-100' y1='-100' x2='100' y2='100' gradientUnits='userSpaceOnUse'>"
+                + "<stop offset='0' stop-color='#a78bfa'><animate attributeName='stop-color' "
+                + "values='#a78bfa;#38bdf8;#34d399;#fbbf24;#f472b6;#a78bfa' dur='8s' repeatCount='indefinite'/></stop>"
+                + "<stop offset='0.5' stop-color='#34d399'><animate attributeName='stop-color' "
+                + "values='#34d399;#fbbf24;#f472b6;#a78bfa;#38bdf8;#34d399' dur='8s' repeatCount='indefinite'/></stop>"
+                + "<stop offset='1' stop-color='#f472b6'><animate attributeName='stop-color' "
+                + "values='#f472b6;#a78bfa;#38bdf8;#34d399;#fbbf24;#f472b6' dur='8s' repeatCount='indefinite'/></stop>"
+                + "</linearGradient></defs>"
+                + dots
+                + "<circle r='57' fill='none' stroke='url(#g)' stroke-width='13'/>"
+                + "<circle r='29' fill='url(#g)'/>"
+                + "</svg>";
+    }
+
     private static String html() {
-        String gh = "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 "
-                + "0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7 "
-                + "c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998 "
-                + ".108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22 "
-                + "-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 "
-                + "2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 "
-                + "0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57 "
-                + "C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12";
         return "<!DOCTYPE html><html><head><meta charset='utf-8'>"
                 + "<meta name='viewport' content='width=device-width,initial-scale=1'>"
                 + "<style>"
                 + "*{box-sizing:border-box;margin:0;padding:0}"
                 + "body{background:radial-gradient(1200px 600px at 50% -10%,#16202e 0%,#0d1117 60%),#0d1117;"
                 + "color:#e6edf3;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;"
-                + "min-height:100vh;padding:40px 22px 30px}"
+                + "min-height:100vh;padding:44px 22px 30px}"
                 + ".hero{position:relative;width:190px;height:190px;display:flex;align-items:center;justify-content:center;margin-bottom:6px}"
                 + ".ring{position:absolute;inset:0;border-radius:50%;"
                 + "background:conic-gradient(from 0deg,#a78bfa,#38bdf8,#34d399,#fbbf24,#f472b6,#a78bfa);"
@@ -102,7 +153,7 @@ public final class ModuleAboutPage {
                 + "background:conic-gradient(from 180deg,#f472b6,#fbbf24,#34d399,#38bdf8,#a78bfa,#f472b6);"
                 + "animation:spin 6s linear infinite reverse}"
                 + ".hole{position:absolute;inset:17px;border-radius:50%;background:#0d1117}"
-                + ".cat{position:relative;z-index:2;animation:glow 3s ease-in-out infinite alternate}"
+                + ".mark{position:relative;z-index:2}"
                 + "@keyframes spin{to{transform:rotate(360deg)}}"
                 + "@keyframes glow{from{filter:drop-shadow(0 0 6px rgba(167,139,250,.35))}"
                 + "to{filter:drop-shadow(0 0 18px rgba(56,189,248,.7))}}"
@@ -123,34 +174,58 @@ public final class ModuleAboutPage {
                 + ".c1{background:linear-gradient(135deg,#6e40c9,#388bfd)}"
                 + ".c2{background:linear-gradient(135deg,#238636,#3fb950)}"
                 + ".c3{background:linear-gradient(135deg,#d29922,#f0883e)}"
+                + ".c4{background:linear-gradient(135deg,#f0883e,#f85149)}"
                 + ".tt{font-size:15px;font-weight:bold}.sub{font-size:12px;color:#7d8590;margin-top:3px}"
                 + ".arr{margin-left:auto;color:#7d8590;font-size:18px}"
                 + ".foot{margin-top:auto;padding-top:30px}"
                 + "a.log{color:#58a6ff;font-size:13px;text-decoration:none}"
                 + "</style></head><body>"
                 + "<div class='hero'><div class='ring'></div><div class='ring2'></div><div class='hole'></div>"
-                + "<svg class='cat' width='104' height='104' viewBox='0 0 24 24'>"
-                + "<defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>"
-                + "<stop offset='0' stop-color='#a78bfa'><animate attributeName='stop-color' "
-                + "values='#a78bfa;#38bdf8;#34d399;#fbbf24;#f472b6;#a78bfa' dur='8s' repeatCount='indefinite'/></stop>"
-                + "<stop offset='1' stop-color='#38bdf8'><animate attributeName='stop-color' "
-                + "values='#38bdf8;#34d399;#fbbf24;#f472b6;#a78bfa;#38bdf8' dur='8s' repeatCount='indefinite'/></stop>"
-                + "</linearGradient></defs>"
-                + "<path fill='url(#g)' d='" + gh + "'/></svg></div>"
+                + "<div class='mark'>" + markSvg() + "</div></div>"
                 + "<h1>LiveXP</h1>"
                 + "<div class='ver'>v" + BuildConfig.VERSION_NAME + " · for QQ 9.3.70 (NT)</div>"
                 + "<div class='desc'>QQ 实况图片检测模块。检测聊天中的实况照片(动态照片),"
                 + "在气泡右上角标注「实况」;支持普通图片与群文件大图,"
-                + "并使用本地双 md5 库持久化判定结果,重启后秒判。<br>点按下方卡片可复制对应链接 / 邮箱。</div>"
+                + "并使用本地双 md5 库持久化判定结果,重启后秒判。<br>点按卡片复制对应链接 / 邮箱。</div>"
                 + "<div class='cards'>"
                 + card("c1", "&#128187;", "项目源码", "github.com/mingyu0401/LiveXP",
-                        copyHref("https://github.com/mingyu0401/LiveXP"))
+                        copyHref("https://github.com/mingyu0401/LiveXP") + "&open=1")
                 + card("c2", "&#128100;", "作者主页", "github.com/mingyu0401",
-                        copyHref("https://github.com/mingyu0401"))
+                        copyHref("https://github.com/mingyu0401") + "&open=1")
                 + card("c3", "&#9993;&#65039;", "联系我", "mingyu0401@qq.com",
                         copyHref("mingyu0401@qq.com") + "&mailto=mingyu0401@qq.com")
+                + card("c4", "&#9749;", "支持作者", "请作者喝杯咖啡",
+                        "livexp://support")
                 + "</div>"
                 + "<div class='foot'><a class='log' href='livexp://logs'>查看运行日志</a></div>"
+                + "</body></html>";
+    }
+
+    private static String supportHtml() {
+        return "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                + "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                + "<style>"
+                + "*{box-sizing:border-box;margin:0;padding:0}"
+                + "body{background:rgba(13,17,23,.92);color:#e6edf3;font-family:sans-serif;"
+                + "display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:48px 28px 34px}"
+                + "h1{font-size:28px;margin-bottom:22px;"
+                + "background:linear-gradient(90deg,#fbbf24,#f0883e,#f85149,#fbbf24);"
+                + "-webkit-background-clip:text;background-clip:text;color:transparent;background-size:200% 100%;"
+                + "animation:shift 5s linear infinite}"
+                + "@keyframes shift{to{background-position:200% 0}}"
+                + ".txt{color:#c9d1d9;font-size:16px;line-height:1.9;text-align:center;max-width:460px;margin-bottom:24px}"
+                + ".qr{background:#fff;border-radius:16px;padding:14px;margin-bottom:28px}"
+                + ".qr img{width:min(64vw,300px);height:auto;display:block}"
+                + "a.btn{display:block;text-align:center;width:220px;padding:12px 0;border-radius:12px;"
+                + "background:#30363d;color:#9aa0a8;font-size:15px;text-decoration:none;transition:background .2s}"
+                + "a.btn:active{background:#3d444d}"
+                + "</style></head><body>"
+                + "<h1>支持作者</h1>"
+                + "<div class='txt'>作者大学牲,精力和 token 来之不易。<br>"
+                + "如果您觉得这个模块好用,可以请作者喝一杯咖啡&#9749;<br>"
+                + "您的支持是我更新的动力!</div>"
+                + "<div class='qr'><img src='data:image/webp;base64," + SupportAssets.QR_WEBP_BASE64 + "'/></div>"
+                + "<a class='btn' href='livexp://close'>下次一定</a>"
                 + "</body></html>";
     }
 

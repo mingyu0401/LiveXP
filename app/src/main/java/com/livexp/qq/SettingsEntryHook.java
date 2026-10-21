@@ -309,10 +309,20 @@ public final class SettingsEntryHook {
         }
     }
 
-    /** 入口点击:进模块关于二级页(炫彩 GitHub 图标 + 简介 + 链接)。 */
+    /** 入口点击:进模块关于二级页(炫彩图标 + 简介 + 链接)。 */
     private static void onEntryClick(Context ctx) {
         Log.i("entry clicked, opening about page");
-        ModuleAboutPage.showDialog(ctx, () -> showLogPanel(ctx));
+        ModuleAboutPage.showDialog(ctx, new ModuleAboutPage.Actions() {
+            @Override
+            public void openLogs() {
+                showLogPanel(ctx);
+            }
+
+            @Override
+            public void openSupport() {
+                ModuleAboutPage.showSupportDialog(ctx);
+            }
+        });
     }
 
     /** 关于页底部的「查看运行日志」入口(原日志面板保留)。 */
