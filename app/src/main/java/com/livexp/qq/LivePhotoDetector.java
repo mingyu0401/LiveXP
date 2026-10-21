@@ -61,7 +61,7 @@ public final class LivePhotoDetector {
 
     private LivePhotoDetector() {}
 
-    /** 消息里是否含图片元素(每张图 dump 一次 PicElement 字段,便于继续校准)。 */
+    /** 消息里是否含图片/文件元素(每张图 dump 一次字段,便于继续校准)。群文件大图以 FileMsgItem+fileElement 出现。 */
     public static boolean hasPic(Object msgRecord) {
         Object elements;
         try {
@@ -78,9 +78,24 @@ public final class LivePhotoDetector {
             } catch (Throwable ignored) {
                 continue;
             }
-            if (pic == null) continue;
-            dumpOnce(pic);
-            return true;
+            if (pic != null) {
+                dumpOnce(pic);
+                return true;
+            }
+            Object file;
+            try {
+                file = XposedHelpers.getObjectField(element, "fileElement");
+            } catch (Throwable ignored) {
+                continue;
+            }
+            if (file != null) {
+                dumpFileOnce(file);
+                // 只对图片文件打标(压缩包/视频等不扫描不记库),FileElement 用 picWidth/picHeight 区分
+                Object w = num(file, "picWidth");
+                Object h = num(file, "picHeight");
+                if (isPositive(w) || isPositive(h)) return true;
+                continue;
+            }
         }
         return false;
     }
@@ -160,7 +175,7 @@ public final class LivePhotoDetector {
         return md5 != null && md5Live.contains(md5);
     }
 
-    /** 从 MsgRecord 的 PicElement 里取内容 md5(跨重启/跨设备稳定),小写,取不到返回 null。 */
+    /** 从 MsgRecord 的 PicElement(或群文件 FileElement)里取内容 md5(跨重启/跨设备稳定),小写,取不到返回 null。 */
     public static String picMd5Of(Object msgRecord) {
         if (msgRecord == null) return null;
         try {
@@ -172,12 +187,24 @@ public final class LivePhotoDetector {
                 try {
                     pic = XposedHelpers.getObjectField(element, "picElement");
                 } catch (Throwable ignored) {
-                    continue;
+                    pic = null;
                 }
-                if (pic == null) continue;
-                Object md5 = XposedHelpers.getObjectField(pic, "md5HexStr");
-                String s = md5 instanceof String ? ((String) md5).trim().toLowerCase(Locale.US) : null;
-                return (s == null || s.isEmpty()) ? null : s;
+                if (pic != null) {
+                    Object md5 = XposedHelpers.getObjectField(pic, "md5HexStr");
+                    String s = md5 instanceof String ? ((String) md5).trim().toLowerCase(Locale.US) : null;
+                    return (s == null || s.isEmpty()) ? null : s;
+                }
+                Object file;
+                try {
+                    file = XposedHelpers.getObjectField(element, "fileElement");
+                } catch (Throwable ignored) {
+                    file = null;
+                }
+                if (file != null) {
+                    Object md5 = XposedHelpers.getObjectField(file, "fileMd5");
+                    String s = md5 instanceof String ? ((String) md5).trim().toLowerCase(Locale.US) : null;
+                    return (s == null || s.isEmpty()) ? null : s;
+                }
             }
         } catch (Throwable ignored) {
         }
@@ -348,6 +375,28 @@ public final class LivePhotoDetector {
         Log.i(sb.toString());
     }
 
+    /** 每条文件消息只 dump 一次 FileElement 全部字段,学习群文件图片的可用标识。 */
+    private static void dumpFileOnce(Object file) {
+        String key;
+        try {
+            key = "file|" + str(file, "fileName") + "|" + str(file, "fileMd5");
+        } catch (Throwable t) {
+            return;
+        }
+        if (!dumpedKeys.add(key) || dumpedKeys.size() > DUMP_CAP) return;
+        StringBuilder sb = new StringBuilder("[").append(HookEntry.TAG).append("] FileElement dump: ");
+        for (Field f : file.getClass().getFields()) {
+            try {
+                Object v = f.get(file);
+                String s = String.valueOf(v);
+                if (s.length() > 160) s = s.substring(0, 160) + "...";
+                sb.append(f.getName()).append('=').append(s).append("; ");
+            } catch (Throwable ignored) {
+            }
+        }
+        Log.i(sb.toString());
+    }
+
     private static String str(Object obj, String field) {
         try {
             Object v = XposedHelpers.getObjectField(obj, field);
@@ -355,5 +404,17 @@ public final class LivePhotoDetector {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    private static Object num(Object obj, String field) {
+        try {
+            return XposedHelpers.getObjectField(obj, field);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static boolean isPositive(Object v) {
+        return v instanceof Number && ((Number) v).longValue() > 0;
     }
 }
