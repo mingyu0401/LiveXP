@@ -122,7 +122,7 @@ public final class ModuleAboutPage {
                     .append("' cy='").append(String.format("%.1f", y))
                     .append("' r='9' fill='url(#g)'/>");
         }
-        return "<svg width='83' height='83' viewBox='-100 -100 200 200' style='animation:glow 3s ease-in-out infinite alternate'>"
+        return "<svg width='70' height='70' viewBox='-100 -100 200 200' style='animation:glow 3s ease-in-out infinite alternate'>"
                 + "<defs><linearGradient id='g' x1='-100' y1='-100' x2='100' y2='100' gradientUnits='userSpaceOnUse'>"
                 + "<stop offset='0' stop-color='#a78bfa'><animate attributeName='stop-color' "
                 + "values='#a78bfa;#38bdf8;#34d399;#fbbf24;#f472b6;#a78bfa' dur='8s' repeatCount='indefinite'/></stop>"
@@ -145,14 +145,10 @@ public final class ModuleAboutPage {
                 + "body{background:radial-gradient(1200px 600px at 50% -10%,#16202e 0%,#0d1117 60%),#0d1117;"
                 + "color:#e6edf3;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;"
                 + "min-height:100vh;padding:44px 22px 30px}"
-                + ".hero{position:relative;width:190px;height:190px;display:flex;align-items:center;justify-content:center;margin-bottom:6px}"
+                + ".hero{position:relative;width:150px;height:150px;display:flex;align-items:center;justify-content:center;margin-bottom:6px}"
                 + ".ring{position:absolute;inset:0;border-radius:50%;"
                 + "background:conic-gradient(from 0deg,#a78bfa,#38bdf8,#34d399,#fbbf24,#f472b6,#a78bfa);"
                 + "animation:spin 4s linear infinite;filter:blur(14px);opacity:.55}"
-                + ".ring2{position:absolute;inset:14px;border-radius:50%;"
-                + "background:conic-gradient(from 180deg,#f472b6,#fbbf24,#34d399,#38bdf8,#a78bfa,#f472b6);"
-                + "animation:spin 6s linear infinite reverse}"
-                + ".hole{position:absolute;inset:17px;border-radius:50%;background:#0d1117}"
                 + ".mark{position:relative;z-index:2}"
                 + "@keyframes spin{to{transform:rotate(360deg)}}"
                 + "@keyframes glow{from{filter:drop-shadow(0 0 6px rgba(167,139,250,.35))}"
@@ -172,7 +168,6 @@ public final class ModuleAboutPage {
                 + ".ico{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;"
                 + "font-size:19px;flex:none}"
                 + ".c1{background:linear-gradient(135deg,#6e40c9,#388bfd)}"
-                + ".c2{background:linear-gradient(135deg,#238636,#3fb950)}"
                 + ".c3{background:linear-gradient(135deg,#d29922,#f0883e)}"
                 + ".c4{background:linear-gradient(135deg,#f0883e,#f85149)}"
                 + ".tt{font-size:15px;font-weight:bold}.sub{font-size:12px;color:#7d8590;margin-top:3px}"
@@ -180,20 +175,19 @@ public final class ModuleAboutPage {
                 + ".foot{margin-top:auto;padding-top:30px}"
                 + "a.log{color:#58a6ff;font-size:13px;text-decoration:none}"
                 + "</style></head><body>"
-                + "<div class='hero'><div class='ring'></div><div class='ring2'></div><div class='hole'></div>"
+                + "<div class='hero'><div class='ring'></div>"
                 + "<div class='mark'>" + markSvg() + "</div></div>"
-                + "<h1>LiveXP</h1>"
+                + "<h1>LiveXP By 明雨</h1>"
                 + "<div class='ver'>v" + BuildConfig.VERSION_NAME + " · for QQ 9.3.70 (NT)</div>"
                 + "<div class='desc'>QQ 实况图片检测模块。检测聊天中的实况照片(动态照片),"
                 + "在气泡右上角标注「实况」;支持普通图片与群文件大图,"
-                + "并使用本地双 md5 库持久化判定结果,重启后秒判。<br>点按卡片复制对应链接 / 邮箱。</div>"
+                + "并使用本地双 md5 库持久化判定结果,重启后秒判。<br>关于明雨:一个思想天马行空的大学生。"
+                + "<br>点按卡片复制对应链接 / 邮箱。</div>"
                 + "<div class='cards'>"
                 + card("c1", "&#128187;", "项目源码", "github.com/mingyu0401/LiveXP",
                         copyHref("https://github.com/mingyu0401/LiveXP") + "&open=1")
-                + card("c2", "&#128100;", "作者主页", "github.com/mingyu0401",
-                        copyHref("https://github.com/mingyu0401") + "&open=1")
-                + card("c3", "&#9993;&#65039;", "联系我", "mingyu0401@qq.com",
-                        copyHref("mingyu0401@qq.com") + "&mailto=mingyu0401@qq.com")
+                + card("c3", "&#9993;&#65039;", "联系我", "mingyu0401a@163.com",
+                        copyHref("mingyu0401a@163.com") + "&mailto=mingyu0401a@163.com")
                 + card("c4", "&#9749;", "支持作者", "请作者喝杯咖啡",
                         "livexp://support")
                 + "</div>"
@@ -223,7 +217,7 @@ public final class ModuleAboutPage {
                 + "<h1>支持作者</h1>"
                 + "<div class='txt'>作者大学牲,精力和 token 来之不易。<br>"
                 + "如果您觉得这个模块好用,可以请作者喝一杯咖啡&#9749;<br>"
-                + "您的支持是我更新的动力!</div>"
+                + "LiveXP功能免费,自愿赞赏,感谢支持.<br>您的支持是我更新的动力!</div>"
                 + "<div class='qr'><img src='data:image/webp;base64," + SupportAssets.QR_WEBP_BASE64 + "'/></div>"
                 + "<a class='btn' href='livexp://close'>下次一定</a>"
                 + "</body></html>";
