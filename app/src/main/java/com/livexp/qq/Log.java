@@ -8,13 +8,10 @@ import java.util.Locale;
 
 import de.robv.android.xposed.XposedBridge;
 
-/** 文件日志:同时写 QQ 私有目录和公共 Download,并镜像到 LSPosed 日志。 */
+/** 文件日志:写 QQ 数据目录下模块专属文件夹,并镜像到 LSPosed 日志。 */
 public final class Log {
 
-    private static final String[] DIRS = {
-            "/sdcard/Android/data/com.tencent.mobileqq/files/LiveXP",
-            "/sdcard/Download/LiveXP",
-    };
+    private static final String DIR = "/sdcard/Android/data/com.tencent.mobileqq/LiveXP";
 
     private static FileWriter[] writers = new FileWriter[0];
     private static String readyPaths = "";
@@ -22,18 +19,15 @@ public final class Log {
     private Log() {}
 
     public static synchronized void init() {
-        java.util.ArrayList<FileWriter> ok = new java.util.ArrayList<>();
         StringBuilder paths = new StringBuilder();
-        for (String dir : DIRS) {
-            try {
-                new File(dir).mkdirs();
-                ok.add(new FileWriter(dir + "/livexp.log", true));
-                if (paths.length() > 0) paths.append(" | ");
-                paths.append(dir).append("/livexp.log");
-            } catch (Throwable ignored) {
-            }
+        FileWriter w = null;
+        try {
+            new File(DIR).mkdirs();
+            w = new FileWriter(DIR + "/livexp.log", true);
+            paths.append(DIR).append("/livexp.log");
+        } catch (Throwable ignored) {
         }
-        writers = ok.toArray(new FileWriter[0]);
+        writers = w == null ? new FileWriter[0] : new FileWriter[]{w};
         readyPaths = paths.toString();
         i("log file ready: " + (readyPaths.isEmpty() ? "无(全部写入失败)" : readyPaths));
     }

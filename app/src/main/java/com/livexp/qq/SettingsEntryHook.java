@@ -558,7 +558,7 @@ public final class SettingsEntryHook {
                 + "hostView 解析: " + (LiveBadgeHook.hostViewResolved ? "成功" : "失败") + "\n"
                 + "msgItem 解析: " + LiveBadgeHook.msgItemMethod + "\n"
                 + "气泡绑定次数: " + LiveBadgeHook.boundCount + "\n"
-                + "图片消息 dump 数: " + LivePhotoDetector.dumpCount + "\n"
+                + "已判定实况消息数: " + LivePhotoDetector.liveMsgIds.size() + "\n"
                 + "实况图命中数: " + LivePhotoDetector.liveHitCount;
         try {
             new AlertDialog.Builder(ctx)

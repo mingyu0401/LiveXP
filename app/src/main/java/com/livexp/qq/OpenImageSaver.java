@@ -24,7 +24,9 @@ import de.robv.android.xposed.XposedHelpers;
 public final class OpenImageSaver {
 
     private static final String API_IMPL = "com.tencent.qqnt.aio.msg.api.impl.AIOMsgItemApiImpl";
-    private static final File DEST_DIR = new File("/sdcard/Download/LiveXP/opens");
+    // 模块专属文件夹在 QQ 数据目录下,opens/ 存点开后捕获的原图
+    private static final File DEST_DIR =
+            new File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/opens");
     private static final long MIN_ORIGINAL_SIZE = 512 * 1024;
 
     private static final Set<String> loggedPaths = ConcurrentHashMap.newKeySet();
@@ -52,6 +54,7 @@ public final class OpenImageSaver {
                             Log.i("getLocalPath -> " + path);
                         }
                         saveIfLarge(path);
+                        LivePhotoDetector.detectAsync(path, msgRecordOf(param.args), null);
                     } catch (Throwable t) {
                         Log.i("open-saver hook error: " + t);
                     }
@@ -69,20 +72,35 @@ public final class OpenImageSaver {
         }
     }
 
-    /** bind 时主动查一次本地路径,不依赖 QQ 是否自己调用。每个路径只记一次日志。 */
-    public static void probeLocalPath(Object msgItem) {
+    /** bind 时主动查一次本地路径,不依赖 QQ 是否自己调用。每个路径只记一次日志。返回路径,查不到返回 null。 */
+    public static String probeLocalPath(Object msgItem) {
         try {
             Method m = probeMethod;
-            if (m == null || msgItem == null) return;
+            if (m == null || msgItem == null) return null;
             Object r = m.invoke(m.getDeclaringClass().newInstance(), msgItem);
-            if (!(r instanceof String) || ((String) r).isEmpty()) return;
+            if (!(r instanceof String) || ((String) r).isEmpty()) return null;
             String path = (String) r;
             if (loggedPaths.add(path)) {
                 Log.i("probe getLocalPath -> " + path);
             }
             saveIfLarge(path);
+            return path;
         } catch (Throwable ignored) {
+            return null;
         }
+    }
+
+    private static Object msgRecordOf(Object[] args) {
+        if (args == null) return null;
+        for (Object a : args) {
+            if (a == null) continue;
+            try {
+                Object rec = XposedHelpers.callMethod(a, "getMsgRecord");
+                if (rec != null) return rec;
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
     }
 
     private static void saveIfLarge(String path) {

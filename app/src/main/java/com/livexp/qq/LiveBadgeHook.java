@@ -113,14 +113,18 @@ public final class LiveBadgeHook {
         Object host = hostViewGetter.invoke(param.thisObject);
         if (!(host instanceof ViewGroup)) return;
         ViewGroup root = (ViewGroup) host;
-        // TODO 校准期临时逻辑:所有图片气泡一律打标,等实况判定校准完成后换回
-        //  if (LivePhotoDetector.isLive(msgRecord)) show else { hide; scheduleFileCheck }
-        if (LivePhotoDetector.hasPicAndDump(msgRecord)) {
-            BadgeInjector.show(root);
-            OpenImageSaver.probeLocalPath(msgItem);
-        } else {
+        if (!LivePhotoDetector.hasPic(msgRecord)) {
             BadgeInjector.hide(root);
+            return;
         }
+        String msgId = LivePhotoDetector.msgIdOf(msgRecord);
+        if (msgId != null && LivePhotoDetector.liveMsgIds.contains(msgId)) {
+            BadgeInjector.show(root);
+            return;
+        }
+        BadgeInjector.hide(root);
+        String path = OpenImageSaver.probeLocalPath(msgItem);
+        LivePhotoDetector.detectAsync(path, msgRecord, root);
     }
 
     /** UI 状态对象 -> AIOMsgItem。方法名被混淆,按返回类型解析:精确 AIOMsgItem 或其基类 msglist.a。 */
