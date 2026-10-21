@@ -139,6 +139,9 @@ public final class LivePhotoDetector {
         if (path == null) path = OpenImageSaver.probeLocalPath(msgItem);
         View img = root == null ? null : BadgeInjector.findLargestImageView(root);
         if (liveBinds.size() >= 40) liveBinds.clear();
+        if (candidates.size() >= 40) candidates.clear();
+        purgeRecycled(liveBinds, img);
+        purgeRecycled(candidates, img);
         liveBinds.put(msgId, new BindAnchor(path, picMd5Of(msgRecord), img));
     }
 
@@ -147,7 +150,22 @@ public final class LivePhotoDetector {
         if (msgId == null || liveMsgIds.contains(msgId)) return;
         View img = root == null ? null : BadgeInjector.findLargestImageView(root);
         if (candidates.size() >= 40) candidates.clear();
+        purgeRecycled(candidates, img);
         candidates.put(msgId, new BindAnchor(path, picMd5Of(msgRecord), img));
+    }
+
+    /**
+     * 聊天气泡的 ImageView 会被 RecyclerView 回收复用:同一个 View 实例换绑到别的消息后,
+     * 旧登记的缩略图矩形就会匹配到当前这一条,反查出别人的路径。登记新锚点前先按实例身份清掉旧账。
+     */
+    private static void purgeRecycled(Map<String, BindAnchor> map, View img) {
+        if (img == null) return;
+        map.entrySet().removeIf(e -> {
+            BindAnchor a = e.getValue();
+            if (a.image == null) return false;
+            View v = a.image.get();
+            return v == img;
+        });
     }
 
     /** 扫描/轮询确认实况后统一登记:liveMsgIds + 路径缓存 + md5 库1。 */

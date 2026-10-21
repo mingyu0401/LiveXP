@@ -38,6 +38,8 @@ import de.robv.android.xposed.XposedHelpers;
 public final class LiveVideoPlayer {
 
     private static final long PENDING_FRESH_MS = 8000;
+    /** 等相册页码映射的最长时间,超时才退回 thumb-bound 反查。 */
+    private static final long INITIAL_ALBUM_WAIT_MS = 1500;
     private static final File CACHE_DIR =
             new File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/video_cache");
 
@@ -65,9 +67,14 @@ public final class LiveVideoPlayer {
     private static volatile java.util.List<Boolean> albumLive;
     private static volatile java.util.List<String> albumIds;
     private static volatile int lastSettledPos = -1;
+    /** 本次打开查看器时 thumb-bound/pending 给出的首屏猜测,相册映射到手即作废。 */
+    private static volatile Match initialMatch;
+    private static volatile boolean initialResolved;
+    private static volatile int initialSeq;
     private static final Map<Integer, Object> pageRec = new ConcurrentHashMap<>();
     private static final Map<Integer, String> pagePath = new ConcurrentHashMap<>();
     private static final java.util.Set<Class<?>> hookedAdapters = ConcurrentHashMap.newKeySet();
+    private static volatile boolean scrollSignalInstalled;
     /** 翻页计数:playWhenReady 等待期间翻页则放弃播放。 */
     private static volatile int pageSeq;
 
@@ -84,31 +91,70 @@ public final class LiveVideoPlayer {
     public static void onGalleryResumed(Activity activity) {
         try {
             galleryRef = activity;
+            initialSeq++;
+            initialResolved = false;
+            setupPager(activity);   // 先定好 currentItem 并启动相册扫描
             String p = pendingPath;
             if (p != null && SystemClock.uptimeMillis() - pendingAt < PENDING_FRESH_MS) {
                 pendingPath = null;
-                currentSrc = p;
-                installButton(activity);
-                play(activity, p);
-                return;
+                initialMatch = new Match(null, p, null, true);
+            } else {
+                Match m = matchByThumbBound(activity);
+                Log.i("thumb-bound resolve: " + (m == null ? "null"
+                        : "msgId=" + m.msgId + " path=" + m.path + " confirmed=" + m.confirmed));
+                initialMatch = m;
             }
-            Log.i("gallery resumed, no pending");
-            Match m = matchByThumbBound(activity);
-            Log.i("thumb-bound resolve: " + (m == null ? "null"
-                    : "msgId=" + m.msgId + " path=" + m.path + " confirmed=" + m.confirmed));
-            if (m != null) {
+            MAIN.postDelayed(() -> resolveInitialPage(
+                    SystemClock.uptimeMillis() + INITIAL_ALBUM_WAIT_MS, initialSeq), 60);
+        } catch (Throwable t) {
+            Log.i("gallery resume error: " + t);
+        }
+    }
+
+    /**
+     * 首屏这一页到底播哪张:相册映射按页码索引,不受聊天气泡 View 回收影响,优先采用;
+     * 扫描没在 INITIAL_ALBUM_WAIT_MS 内给出映射时(转发查看器等)才退回 thumb-bound。
+     */
+    private static void resolveInitialPage(long deadline, int seq) {
+        try {
+            Activity a = galleryRef;
+            if (a == null || a.isFinishing() || initialResolved || seq != initialSeq) return;
+            java.util.List<String> paths = albumPaths;
+            int pos = lastSettledPos;
+            if (paths != null && pos >= 0 && pos < paths.size()) {
+                PageData d = pageDataAt(pos);
+                if (d != null && d.path != null) {
+                    Match stale = initialMatch;
+                    if (stale != null && stale.path != null && !stale.path.equals(d.path))
+                        Log.i("thumb-bound stale, use album path: " + d.path);
+                    initialResolved = true;
+                    initialMatch = null;
+                    Log.i("initial page from album: pos=" + pos + " path=" + d.path);
+                    applyPage(a, d);
+                    return;
+                }
+            }
+            if (SystemClock.uptimeMillis() >= deadline) {
+                initialResolved = true;
+                Match m = initialMatch;
+                initialMatch = null;
+                if (m == null) {
+                    Log.i("initial page unresolved: no album mapping and no thumb-bound match");
+                    return;
+                }
+                Log.i("initial page from thumb-bound: " + m.path);
                 if (m.confirmed) {
                     currentSrc = m.path;
-                    installButton(activity);
-                    playAuto(activity, m.path);
+                    installButton(a);
+                    playAuto(a, m.path);
                 } else {
                     playWhenReady(m.msgId, m.path, m.md5);
                 }
+                return;
             }
-            setupPager(activity);
-            MAIN.postDelayed(() -> dumpGalleryHierarchy(activity), 1200);
+            MAIN.postDelayed(() -> resolveInitialPage(deadline, seq), 200);
         } catch (Throwable t) {
-            Log.i("gallery resume error: " + t);
+            Log.i("resolveInitialPage error: " + t);
         }
     }
 
@@ -126,6 +172,9 @@ public final class LiveVideoPlayer {
         albumIds = null;
         lastSettledPos = -1;
         pageSeq++;
+        initialMatch = null;
+        initialResolved = false;
+        initialSeq++;
         pageRec.clear();
         pagePath.clear();
         playedPaths.clear();
@@ -473,44 +522,6 @@ public final class LiveVideoPlayer {
         return galleryRef != null;
     }
 
-    /** 每次查看器会话 dump 一次 decor 层级:定位真实的翻页组件与各 RecyclerView 的 adapter。 */
-    private static void dumpGalleryHierarchy(Activity act) {
-        try {
-            if (galleryRef != act) return;
-            StringBuilder sb = new StringBuilder();
-            dumpView((ViewGroup) act.getWindow().getDecorView(), 0, sb, new int[1]);
-            String s = sb.toString();
-            for (int i = 0; i < s.length(); i += 1400) {
-                Log.i("decor dump[" + (i / 1400) + "]: " + s.substring(i, Math.min(s.length(), i + 1400)));
-            }
-        } catch (Throwable t) {
-            Log.i("decor dump error: " + t);
-        }
-    }
-
-    private static void dumpView(View v, int depth, StringBuilder sb, int[] count) {
-        if (depth > 12 || count[0] > 160) return;
-        for (int i = 0; i < depth; i++) sb.append(' ');
-        count[0]++;
-        sb.append(v.getClass().getName());
-        if (v.getClass().getName().contains("RecyclerView")) {
-            try {
-                Object ad = XposedHelpers.callMethod(v, "getAdapter");
-                Object lm = XposedHelpers.callMethod(v, "getLayoutManager");
-                Object cnt = ad == null ? null : XposedHelpers.callMethod(ad, "getItemCount");
-                sb.append(" [adapter=").append(ad == null ? "null" : ad.getClass().getName())
-                        .append(" items=").append(cnt)
-                        .append(" lm=").append(lm == null ? "null" : lm.getClass().getName()).append(']');
-            } catch (Throwable ignored) {
-            }
-        }
-        sb.append('\n');
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) dumpView(g.getChildAt(i), depth + 1, sb, count);
-        }
-    }
-
     /** 在 decor 里找查看器分页组件:QQ 绕过 ViewPager2 直接驱动内层 RecyclerView,翻页信号要另挂。 */
     private static void setupPager(Activity act) {
         try {
@@ -564,6 +575,9 @@ public final class LiveVideoPlayer {
      */
     private static void installScrollSignal(Object rv) {
         try {
+            // 回调按 innerRv 过滤,进程级装一次就够;每次开会话都重装会撞上
+            // LSPosed 的 "callback already registered 64 times" 上限,之后翻页信号彻底失效(真机实测)。
+            if (scrollSignalInstalled) return;
             Class<?> rvBase = null;
             for (Class<?> c = rv.getClass(); c != null; c = c.getSuperclass()) {
                 if ("androidx.recyclerview.widget.RecyclerView".equals(c.getName())) {
@@ -606,6 +620,7 @@ public final class LiveVideoPlayer {
                             if (pos >= 0) onGalleryPage(pos);
                         }
                     });
+            scrollSignalInstalled = true;
             Log.i("gallery scroll signal installed on " + rvBase.getName());
         } catch (Throwable t) {
             Log.i("installScrollSignal error: " + t);
@@ -649,6 +664,7 @@ public final class LiveVideoPlayer {
             java.util.Deque<Object> queue = new java.util.ArrayDeque<>();
             android.os.Bundle ex =
                     act.getIntent() == null ? null : act.getIntent().getExtras();
+            StringBuilder extraNames = new StringBuilder();
             if (ex != null) {
                 for (String k : ex.keySet()) {
                     Object v;
@@ -658,8 +674,10 @@ public final class LiveVideoPlayer {
                         continue;
                     }
                     if (v == null) continue;
-                    Log.i("gallery extra: " + k + " = " + v.getClass().getSimpleName()
-                            + (v instanceof java.util.List ? "(size=" + ((java.util.List<?>) v).size() + ")" : ""));
+                    extraNames.append(k).append('=')
+                            .append(v.getClass().getSimpleName())
+                            .append(v instanceof java.util.List
+                                    ? "(size=" + ((java.util.List<?>) v).size() + ")" : "").append(' ');
                     if (v instanceof java.util.List && Math.abs(((java.util.List<?>) v).size() - itemCount) <= 2) {
                         java.util.List<PageData> pd = pageDataOf((java.util.List<?>) v);
                         if (pd != null && pd.size() == itemCount) {
@@ -680,7 +698,7 @@ public final class LiveVideoPlayer {
                 Object o = queue.poll();
                 scanned++;
                 if (scanned > 3000) {
-                    Log.i("album scan gave up: scanned=" + scanned);
+                    Log.i("album scan gave up: scanned=" + scanned + " extras=" + extraNames);
                     return;
                 }
                 for (Class<?> c = o.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
@@ -852,23 +870,9 @@ public final class LiveVideoPlayer {
         applyCurrentPageIfUnknown();
     }
 
-    /** 相册映射到手后,若当前这一页还没解析出来(打开时 thumb-bound 没匹配上),补一次判定。 */
+    /** 相册映射到手后立即判定首屏这一页(不再等超时)。 */
     private static void applyCurrentPageIfUnknown() {
-        MAIN.post(() -> {
-            try {
-                Activity a = galleryRef;
-                int pos = lastSettledPos;
-                java.util.List<String> paths = albumPaths;
-                if (a == null || a.isFinishing() || currentSrc != null || pos < 0 || paths == null
-                        || pos >= paths.size()) return;
-                PageData d = pageDataAt(pos);
-                if (d == null || d.path == null) return;
-                Log.i("apply initial page from album: pos=" + pos);
-                applyPage(a, d);
-            } catch (Throwable t) {
-                Log.i("apply initial page error: " + t);
-            }
-        });
+        MAIN.post(() -> resolveInitialPage(0, initialSeq));
     }
 
     /** 诊断用:列出对象第一层字段名与看起来像路径/记录的值。 */
