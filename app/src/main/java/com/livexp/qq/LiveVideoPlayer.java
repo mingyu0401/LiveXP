@@ -73,6 +73,8 @@ public final class LiveVideoPlayer {
     private static volatile int initialSeq;
     private static final Map<Integer, Object> pageRec = new ConcurrentHashMap<>();
     private static final Map<Integer, String> pagePath = new ConcurrentHashMap<>();
+    /** 已经对某一页做过 View 对象图兜底扫描,避免"缩略图→扫描→还是缩略图"来回打转。 */
+    private static final java.util.Set<Integer> viewScanned = ConcurrentHashMap.newKeySet();
     private static final java.util.Set<Class<?>> hookedAdapters = ConcurrentHashMap.newKeySet();
     private static volatile boolean scrollSignalInstalled;
     /** 翻页计数:playWhenReady 等待期间翻页则放弃播放。 */
@@ -130,7 +132,7 @@ public final class LiveVideoPlayer {
                     initialResolved = true;
                     initialMatch = null;
                     Log.i("initial page from album: pos=" + pos + " path=" + d.path);
-                    applyPage(a, d);
+                    applyPage(a, d, pos);
                     return;
                 }
             }
@@ -177,6 +179,7 @@ public final class LiveVideoPlayer {
         initialSeq++;
         pageRec.clear();
         pagePath.clear();
+        viewScanned.clear();
         playedPaths.clear();
     }
 
@@ -321,7 +324,7 @@ public final class LiveVideoPlayer {
             Log.i("gallery page selected: pos=" + pos + " path=" + (d == null ? "null" : d.path)
                     + " msgId=" + (d == null ? "null" : d.mediaId) + " qqLive=" + (d == null ? "-" : d.live));
             if (d != null && d.path != null) {
-                applyPage(act, d);
+                applyPage(act, d, pos);
                 return;
             }
             // 页码映射还没拿到:从当前页 View 的对象图里挖(后台跑,避免主线程反射风暴)
@@ -353,15 +356,31 @@ public final class LiveVideoPlayer {
     }
 
     /** 拿到某页数据后的判定与播放。 */
-    private static void applyPage(Activity act, PageData d) {
+    private static void applyPage(Activity act, PageData d, int pos) {
         String path = d.path;
         String msgId = d.mediaId != null ? d.mediaId
                 : (d.rec == null ? null : LivePhotoDetector.msgIdOf(d.rec));
-        String md5 = d.rec == null ? null : LivePhotoDetector.picMd5Of(d.rec);
+        String md5 = d.rec == null ? null : LivePhotoDetector.picMd5OfAt(d.rec, d.picIndex);
         if (path == null) {
             removeButton();
             currentSrc = null;
             return;
+        }
+        if (LivePhotoDetector.isThumbPath(path)) {
+            // 多图消息的 remembered 路径只对应第一张,拿来兜底会串图
+            String orig = LivePhotoDetector.picCount(d.rec) > 1
+                    ? null : LivePhotoDetector.knownOriginal(msgId);
+            if (orig != null) {
+                Log.i("thumb path replaced by known original: " + orig);
+                path = orig;
+            } else {
+                // 相册条目只带缩略图(原图还没下载),缩略图里没有内嵌视频,硬提只会弹失败提示
+                Log.i("page only has thumbnail, skip play: " + path + " msgId=" + msgId);
+                removeButton();
+                currentSrc = null;
+                if (viewScanned.add(pos)) resolvePageFromView(pos);
+                return;
+            }
         }
         boolean known = (msgId != null && LivePhotoDetector.liveMsgIds.contains(msgId))
                 || LivePhotoDetector.isKnownLiveOpen(path, d.rec);
@@ -400,7 +419,7 @@ public final class LiveVideoPlayer {
                 MAIN.post(() -> {
                     Activity a = galleryRef;
                     if (a == null || a.isFinishing() || seq != pageSeq || lastSettledPos != pos) return;
-                    applyPage(a, d);
+                    applyPage(a, d, pos);
                 });
             } catch (Throwable t) {
                 Log.i("resolvePageFromView error: " + t);
@@ -437,6 +456,8 @@ public final class LiveVideoPlayer {
         Object rec;
         String mediaId;
         Boolean live;
+        /** RFWLayerItemMediaInfo._mediaId 的下标:一条消息多张图时用来取对应那张。 */
+        int picIndex = -1;
     }
 
     /**
@@ -724,6 +745,7 @@ public final class LiveVideoPlayer {
                                         Log.i("album elem#0 dump: " + fieldsDump(l.get(0)));
                                         adoptAlbum(pd);
                                         Log.i("album adopted: aligned with " + itemCount + " pages");
+                                        logMultiImage(l, pd);
                                         return;
                                     }
                                 } else if (l.size() == itemCount && !dumpedElem) {
@@ -747,6 +769,71 @@ public final class LiveVideoPlayer {
         } catch (Throwable t) {
             Log.i("discoverAlbum error: " + t);
         }
+    }
+
+    /** 多图消息诊断:同一消息出现多页时,打出每页的原始 _mediaId(含下标)与解析出的路径。 */
+    private static void logMultiImage(java.util.List<?> raw, java.util.List<PageData> pd) {
+        try {
+            java.util.Map<String, Integer> counts = new java.util.HashMap<>();
+            for (PageData d : pd) {
+                if (d != null && d.mediaId != null) {
+                    Integer n = counts.get(d.mediaId);
+                    counts.put(d.mediaId, n == null ? 1 : n + 1);
+                }
+            }
+            for (int i = 0; i < pd.size() && i < raw.size(); i++) {
+                PageData d = pd.get(i);
+                if (d == null || d.mediaId == null) continue;
+                Integer n = counts.get(d.mediaId);
+                if (n == null || n < 2) continue;
+                String rawId = null;
+                try {
+                    Object mid = XposedHelpers.getObjectField(raw.get(i), "_mediaId");
+                    if (mid instanceof String) rawId = (String) mid;
+                } catch (Throwable ignored) {
+                }
+                Log.i("multi-image elem#" + i + " _mediaId=" + rawId
+                        + " idx=" + d.picIndex + " path=" + d.path);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * 相册元素自己那张图的本地路径:优先 layerPicInfo 各档里的原图 localPath。
+     * 全是缩略图时也返回缩略图路径(让上层跳过播放),返回 null 反而会让对象图扫描
+     * 挖到同一条消息第一张的路径,造成串图。
+     */
+    private static String layerPicPath(Object elem) {
+        try {
+            Object lpi = XposedHelpers.getObjectField(elem, "layerPicInfo");
+            if (lpi == null) return null;
+            String thumb = null;
+            for (String fn : new String[]{"_currentPicInfo", "originPicInfo", "bigPicInfo", "smallPicInfo"}) {
+                Object pi;
+                try {
+                    pi = XposedHelpers.getObjectField(lpi, fn);
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                if (pi == null) continue;
+                Object lp;
+                try {
+                    lp = XposedHelpers.getObjectField(pi, "localPath");
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                if (!(lp instanceof String) || !looksLikePath((String) lp)) continue;
+                if (LivePhotoDetector.isThumbPath((String) lp)) {
+                    if (thumb == null) thumb = (String) lp;
+                } else {
+                    return (String) lp;
+                }
+            }
+            return thumb;
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     private static boolean depthOk(Object v) {
@@ -787,10 +874,26 @@ public final class LiveVideoPlayer {
             Object mid = XposedHelpers.getObjectField(e, "_mediaId");
             if (mid instanceof String) {
                 String s = (String) mid;
-                int i = s.indexOf('_');
-                best.mediaId = i > 0 ? s.substring(0, i) : s;
+                int i = s.lastIndexOf('_');
+                if (i > 0) {
+                    best.mediaId = s.substring(0, i);
+                    try {
+                        // 后缀 0 表示单图消息;多图消息从 1 开始编号,换成 0 基下标
+                        int suffix = Integer.parseInt(s.substring(i + 1));
+                        best.picIndex = Math.max(0, suffix - 1);
+                    } catch (Throwable ignored) {
+                    }
+                } else {
+                    best.mediaId = s;
+                }
             }
         } catch (Throwable ignored) {
+        }
+        // 多图消息:同一条 MsgRecord 被所有元素共享,从对象图里挖到的总是第一张的路径。
+        // 每个元素自己的 layerPicInfo._currentPicInfo.localPath 才是这一页的原图,优先锁定。
+        String own = layerPicPath(e);
+        if (own != null) {
+            best.path = own;
         }
         java.util.Set<Object> visited =
                 java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
@@ -798,14 +901,14 @@ public final class LiveVideoPlayer {
         queue.add(e);
         visited.add(e);
         int scanned = 0;
-        int bestScore = 0;
+        int bestScore = own == null ? 0 : 100;
         while (!queue.isEmpty() && scanned++ < 80) {
             Object o = queue.poll();
             if (best.rec == null && looksLikeMsgRecord(o)) {
                 best.rec = o;
-                String p = LivePhotoDetector.elementPathOf(o);
+                String p = LivePhotoDetector.elementPathOfAt(o, best.picIndex);
                 int sc = pathScore(p);
-                if (sc > bestScore) {
+                if (bestScore < 100 && sc > bestScore) {
                     bestScore = sc;
                     best.path = p;
                 }
@@ -966,12 +1069,18 @@ public final class LiveVideoPlayer {
     private static void startOverlay(Activity activity, File vf) {
         try {
             removeOverlay();
-            Activity act = galleryRef;
+            final Activity act = galleryRef;
             if (act == null || act.isFinishing()) return;
             ViewGroup decor = (ViewGroup) act.getWindow().getDecorView();
-            FrameLayout container = new FrameLayout(act);
-            container.setBackgroundColor(0xFF000000);
+            final FrameLayout container = new FrameLayout(act);
+            // 首帧出来前保持透明(露出下面的照片),避免挂上黑底到出画之间闪黑
+            container.setBackgroundColor(0x00000000);
             VideoView video = new VideoView(act);
+            try {
+                // 半透明 surface:没有帧时是透明的,不会先铺一层黑
+                video.getHolder().setFormat(android.graphics.PixelFormat.TRANSLUCENT);
+            } catch (Throwable ignored) {
+            }
             FrameLayout.LayoutParams vlp = new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                     Gravity.CENTER);
@@ -987,14 +1096,22 @@ public final class LiveVideoPlayer {
             video.setOnTouchListener((v, e) -> false);
             video.setClickable(false);
             video.setLongClickable(false);
-            // 全屏覆盖层同时盖住查看器自身的按钮(播放中无关按钮隐藏)
-            video.setVideoURI(Uri.fromFile(vf));
             video.setOnCompletionListener(mp -> removeOverlay());
             video.setOnErrorListener((mp, what, extra) -> {
                 Log.i("video play error what=" + what + " extra=" + extra);
                 removeOverlay();
                 return true;
             });
+            // 出画后恢复黑底,盖住查看器自己的按钮(否则透明底会露出它们)
+            final Runnable blackout = () -> {
+                if (overlay == container) container.setBackgroundColor(0xFF000000);
+            };
+            video.setOnInfoListener((mp, what, extra) -> {
+                if (what == android.media.MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) blackout.run();
+                return false;
+            });
+            MAIN.postDelayed(blackout, 700); // 回调不来也要恢复黑底
+            video.setVideoURI(Uri.fromFile(vf));
             video.start();
             Log.i("playing overlay video");
         } catch (Throwable t) {

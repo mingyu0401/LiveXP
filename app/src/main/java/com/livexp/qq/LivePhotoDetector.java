@@ -132,11 +132,37 @@ public final class LivePhotoDetector {
     /** 未判定的图片消息 bind 候选:打开大图时缩略图矩形可匹配到它们,后台等原图落盘再判。 */
     public static final Map<String, BindAnchor> candidates = new ConcurrentHashMap<>();
 
+    /**
+     * msgId → 最近一次见过的原图路径。查看器的相册条目有时只带 chatthumb 缩略图路径
+     * (原图还没下载),缩略图里没有内嵌视频,拿它去提取必失败,得换回这条记忆里的原图。
+     */
+    private static final Map<String, String> originalByMsg = new ConcurrentHashMap<>();
+
+    /** 缩略图路径:chatthumb 目录或 _hd 后缀。这类文件不能用于视频提取。 */
+    public static boolean isThumbPath(String p) {
+        return p != null && (p.contains("/chatthumb/") || p.endsWith("_hd"));
+    }
+
+    private static void rememberOriginal(String msgId, String path) {
+        if (msgId == null || path == null || isThumbPath(path)) return;
+        if (originalByMsg.size() >= 300) originalByMsg.clear();
+        originalByMsg.put(msgId, path);
+    }
+
+    /** 该消息已知的原图路径;文件不在盘上就当不知道,免得又提一次空气。 */
+    public static String knownOriginal(String msgId) {
+        if (msgId == null) return null;
+        String p = originalByMsg.get(msgId);
+        if (p == null || !new java.io.File(p).isFile()) return null;
+        return p;
+    }
+
     public static void noteLiveBind(Object msgRecord, ViewGroup root, Object msgItem) {
         String msgId = msgIdOf(msgRecord);
         if (msgId == null) return;
         String path = elementPathOf(msgRecord);
         if (path == null) path = OpenImageSaver.probeLocalPath(msgItem);
+        rememberOriginal(msgId, path);
         View img = root == null ? null : BadgeInjector.findLargestImageView(root);
         if (liveBinds.size() >= 40) liveBinds.clear();
         if (candidates.size() >= 40) candidates.clear();
@@ -148,6 +174,7 @@ public final class LivePhotoDetector {
     public static void noteCandidateBind(Object msgRecord, ViewGroup root, String path) {
         String msgId = msgIdOf(msgRecord);
         if (msgId == null || liveMsgIds.contains(msgId)) return;
+        rememberOriginal(msgId, path);
         View img = root == null ? null : BadgeInjector.findLargestImageView(root);
         if (candidates.size() >= 40) candidates.clear();
         purgeRecycled(candidates, img);
@@ -172,6 +199,7 @@ public final class LivePhotoDetector {
     public static void confirmLive(String msgId, String path, String md5) {
         if (msgId != null) liveMsgIds.add(msgId);
         if (path != null) pathVerdict.put(path, Boolean.TRUE);
+        rememberOriginal(msgId, path);
         recordMd5(md5, true);
         Log.i("live confirmed: " + msgId + " path=" + path);
     }
@@ -189,10 +217,21 @@ public final class LivePhotoDetector {
 
     /** 从 MsgRecord 的 FileElement.filePath / PicElement.sourcePath 取本地路径,取不到返回 null。 */
     public static String elementPathOf(Object msgRecord) {
+        return elementPathOfAt(msgRecord, -1);
+    }
+
+    /**
+     * 取消息里第 idx 张图的本地路径(-1 表示第一张)。
+     * 一条消息可能带多张图,查看器每页对应其中一张,靠 RFWLayerItemMediaInfo._mediaId 的
+     * 后缀(如 7773..._1)区分,否则两页都会拿到第一张的路径、播同一个视频。
+     */
+    public static String elementPathOfAt(Object msgRecord, int idx) {
         if (msgRecord == null) return null;
         try {
             Object elements = XposedHelpers.getObjectField(msgRecord, "elements");
             if (!(elements instanceof List)) return null;
+            int seen = 0;
+            String first = null;
             for (Object element : (List<?>) elements) {
                 if (element == null) continue;
                 Object pic;
@@ -201,21 +240,28 @@ public final class LivePhotoDetector {
                 } catch (Throwable ignored) {
                     pic = null;
                 }
+                String p = null;
                 if (pic != null) {
                     Object sp = XposedHelpers.getObjectField(pic, "sourcePath");
-                    return sp instanceof String && !((String) sp).isEmpty() ? (String) sp : null;
+                    if (sp instanceof String && !((String) sp).isEmpty()) p = (String) sp;
+                } else {
+                    Object file;
+                    try {
+                        file = XposedHelpers.getObjectField(element, "fileElement");
+                    } catch (Throwable ignored) {
+                        file = null;
+                    }
+                    if (file != null) {
+                        Object fp = XposedHelpers.getObjectField(file, "filePath");
+                        if (fp instanceof String && !((String) fp).isEmpty()) p = (String) fp;
+                    }
                 }
-                Object file;
-                try {
-                    file = XposedHelpers.getObjectField(element, "fileElement");
-                } catch (Throwable ignored) {
-                    file = null;
-                }
-                if (file != null) {
-                    Object fp = XposedHelpers.getObjectField(file, "filePath");
-                    if (fp instanceof String && !((String) fp).isEmpty()) return (String) fp;
-                }
+                if (p == null) continue;
+                if (first == null) first = p;
+                if (seen++ == idx) return p;
             }
+            // 指定了下标却找不到(该图原图未落盘)时不要回落到第一张,否则多图消息会串图
+            return idx <= 0 ? first : null;
         } catch (Throwable ignored) {
         }
         return null;
@@ -305,10 +351,17 @@ public final class LivePhotoDetector {
 
     /** 从 MsgRecord 的 PicElement(或群文件 FileElement)里取内容 md5(跨重启/跨设备稳定),小写,取不到返回 null。 */
     public static String picMd5Of(Object msgRecord) {
+        return picMd5OfAt(msgRecord, -1);
+    }
+
+    /** 第 idx 张图的 md5(-1 表示第一张),与 {@link #elementPathOfAt} 同序。 */
+    public static String picMd5OfAt(Object msgRecord, int idx) {
         if (msgRecord == null) return null;
         try {
             Object elements = XposedHelpers.getObjectField(msgRecord, "elements");
             if (!(elements instanceof List)) return null;
+            int seen = 0;
+            String first = null;
             for (Object element : (List<?>) elements) {
                 if (element == null) continue;
                 Object pic;
@@ -317,26 +370,57 @@ public final class LivePhotoDetector {
                 } catch (Throwable ignored) {
                     pic = null;
                 }
+                String s = null;
                 if (pic != null) {
                     Object md5 = XposedHelpers.getObjectField(pic, "md5HexStr");
-                    String s = md5 instanceof String ? ((String) md5).trim().toLowerCase(Locale.US) : null;
-                    return (s == null || s.isEmpty()) ? null : s;
+                    s = md5 instanceof String ? ((String) md5).trim().toLowerCase(Locale.US) : null;
+                } else {
+                    Object file;
+                    try {
+                        file = XposedHelpers.getObjectField(element, "fileElement");
+                    } catch (Throwable ignored) {
+                        file = null;
+                    }
+                    if (file != null) {
+                        Object md5 = XposedHelpers.getObjectField(file, "fileMd5");
+                        s = md5 instanceof String ? ((String) md5).trim().toLowerCase(Locale.US) : null;
+                    }
                 }
-                Object file;
-                try {
-                    file = XposedHelpers.getObjectField(element, "fileElement");
-                } catch (Throwable ignored) {
-                    file = null;
-                }
-                if (file != null) {
-                    Object md5 = XposedHelpers.getObjectField(file, "fileMd5");
-                    String s = md5 instanceof String ? ((String) md5).trim().toLowerCase(Locale.US) : null;
-                    return (s == null || s.isEmpty()) ? null : s;
-                }
+                if (s == null || s.isEmpty()) continue;
+                if (first == null) first = s;
+                if (seen++ == idx) return s;
             }
+            return idx <= 0 ? first : null;
         } catch (Throwable ignored) {
         }
         return null;
+    }
+
+    /** 消息里能拿到本地路径的图片数量(多图消息要按下标区分)。 */
+    public static int picCount(Object msgRecord) {
+        if (msgRecord == null) return 0;
+        try {
+            Object elements = XposedHelpers.getObjectField(msgRecord, "elements");
+            if (!(elements instanceof List)) return 0;
+            int n = 0;
+            for (Object element : (List<?>) elements) {
+                if (element == null) continue;
+                try {
+                    if (XposedHelpers.getObjectField(element, "picElement") != null) {
+                        n++;
+                        continue;
+                    }
+                } catch (Throwable ignored) {
+                }
+                try {
+                    if (XposedHelpers.getObjectField(element, "fileElement") != null) n++;
+                } catch (Throwable ignored) {
+                }
+            }
+            return n;
+        } catch (Throwable ignored) {
+            return 0;
+        }
     }
 
     private static void ensureMd5Loaded() {
