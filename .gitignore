@@ -8,3 +8,8 @@ captures/
 .externalNativeBuild/
 .cxx/
 NVIDIA Corporation/
+
+# 本地签名信息与密钥,绝不入库
+keystore.properties
+*.jks
+*.keystore

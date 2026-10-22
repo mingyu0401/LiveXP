@@ -2,6 +2,13 @@ plugins {
     id 'com.android.application'
 }
 
+// 本地签名信息(keystore.properties 已 gitignore,密钥文件在仓库外)。缺失时 release 退化为未签名产物。
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file('keystore.properties')
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
 android {
     namespace 'com.livexp.qq'
     compileSdk 36
@@ -12,6 +19,25 @@ android {
         targetSdk 36
         versionCode 44
         versionName '1.43'
+    }
+
+    signingConfigs {
+        if (keystorePropsFile.exists()) {
+            release {
+                storeFile file(keystoreProps.storeFile)
+                storePassword keystoreProps.storePassword
+                keyAlias keystoreProps.keyAlias
+                keyPassword keystoreProps.keyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (keystorePropsFile.exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
     }
 
     buildFeatures {
