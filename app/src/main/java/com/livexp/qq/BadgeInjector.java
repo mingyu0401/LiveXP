@@ -37,13 +37,13 @@ public final class BadgeInjector {
         badge.setId(id);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(0x99000000);
-        bg.setCornerRadius(dp(ctx, 6));
+        bg.setCornerRadius(dp(ctx, 7));
         badge.setBackground(bg);
         LiveMarkView mark = new LiveMarkView(ctx);
         badge.addView(mark, new FrameLayout.LayoutParams(
-                dp(ctx, 14), dp(ctx, 14), Gravity.CENTER));
+                dp(ctx, 18), dp(ctx, 18), Gravity.CENTER));
         root.addView(badge);
-        int size = dp(ctx, 20);
+        int size = dp(ctx, 24);
         ViewGroup.LayoutParams lp = badge.getLayoutParams();
         if (lp != null) {
             lp.width = size;

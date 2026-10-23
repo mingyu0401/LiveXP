@@ -975,7 +975,16 @@ public final class LiveVideoPlayer {
         java.util.List<Object> recs = new java.util.ArrayList<>(pd.size());
         java.util.List<Boolean> live = new java.util.ArrayList<>(pd.size());
         java.util.List<String> ids = new java.util.ArrayList<>(pd.size());
+        // _mediaId 后缀是元素下标(纯图片消息从 0 起、带文字消息从 1 起),不能直接当图序;
+        // 同一消息的多页在相册里按图片顺序排列,按出现次序编号才可靠。
+        java.util.Map<String, Integer> occurrences = new java.util.HashMap<>();
         for (PageData d : pd) {
+            if (d != null && d.mediaId != null) {
+                Integer n = occurrences.get(d.mediaId);
+                int idx = n == null ? 0 : n;
+                d.picIndex = idx;
+                occurrences.put(d.mediaId, idx + 1);
+            }
             paths.add(d == null ? null : d.path);
             recs.add(d == null ? null : d.rec);
             live.add(d == null ? null : d.live);

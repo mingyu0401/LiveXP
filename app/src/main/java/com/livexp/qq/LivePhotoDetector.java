@@ -331,6 +331,113 @@ public final class LivePhotoDetector {
         });
     }
 
+    /** chatraw 原始图片目录:多图消息源路径缺失时按 fileSize+md5 反查原图。 */
+    private static final String CHATRAW_DIR =
+            "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic/chatraw";
+    private static final java.util.Map<Long, java.util.List<String>> sizeIndex = new java.util.HashMap<>();
+    private static boolean sizeIndexBuilt;
+    private static final Map<String, String> metaPathHit = new ConcurrentHashMap<>();
+    private static final Set<String> metaPathMiss = ConcurrentHashMap.newKeySet();
+    private static final Set<String> metaPending = ConcurrentHashMap.newKeySet();
+
+    /**
+     * 多图消息的 PicElement.sourcePath 经常为空(发送后清空/原图未下载),
+     * 但 fileSize 与 md5 一定有:按大小筛出候选文件再比对 md5,找到 chatraw 里的原图。
+     * 运行在后台 SCAN_EXEC,命中后继续走文件级判定。
+     */
+    public static void resolvePathByMetaAsync(Object msgRecord, ViewGroup boundRoot, int picIndex) {
+        final long size = picFileSizeAt(msgRecord, picIndex);
+        final String md5 = picMd5OfAt(msgRecord, picIndex);
+        if (size < MIN_DETECT_BYTES || md5 == null) return;
+        final String key = size + ":" + md5;
+        if (!metaPending.add(key)) return;
+        SCAN_EXEC.execute(() -> {
+            String path = null;
+            try {
+                path = findPathByMeta(size, md5);
+                Log.i("meta resolve idx=" + picIndex + " size=" + size + " md5=" + md5
+                        + " -> " + path);
+            } catch (Throwable t) {
+                Log.i("meta resolve error: " + t);
+            } finally {
+                metaPending.remove(key);
+            }
+            if (path != null) detectAsyncAt(path, msgRecord, boundRoot, picIndex);
+        });
+    }
+
+    private static String findPathByMeta(long size, String md5) {
+        String key = size + ":" + md5;
+        String hit = metaPathHit.get(key);
+        if (hit != null) return hit;
+        if (metaPathMiss.contains(key)) return null;
+        buildSizeIndex();
+        java.util.List<String> cands;
+        synchronized (sizeIndex) {
+            java.util.List<String> l = sizeIndex.get(size);
+            cands = l == null ? null : new java.util.ArrayList<>(l);
+        }
+        if (cands != null) {
+            for (String p : cands) {
+                if (md5.equals(md5OfFile(p))) {
+                    metaPathHit.put(key, p);
+                    return p;
+                }
+            }
+        }
+        metaPathMiss.add(key);
+        return null;
+    }
+
+    /** chatraw 按文件大小建索引(只收 ≥1MB 的原图),进程内只建一次。 */
+    private static void buildSizeIndex() {
+        synchronized (sizeIndex) {
+            if (sizeIndexBuilt) return;
+            sizeIndexBuilt = true;
+            collectSizes(new File(CHATRAW_DIR), 0);
+            Log.i("chatraw size index: " + sizeIndex.size() + " sizes");
+        }
+    }
+
+    private static void collectSizes(File dir, int depth) {
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        for (File f : files) {
+            if (f.isDirectory()) {
+                if (depth < 2) collectSizes(f, depth + 1);
+                continue;
+            }
+            long len = f.length();
+            if (len < MIN_DETECT_BYTES) continue;
+            java.util.List<String> l = sizeIndex.get(len);
+            if (l == null) {
+                l = new java.util.ArrayList<>(2);
+                sizeIndex.put(len, l);
+            }
+            if (l.size() < 8) l.add(f.getAbsolutePath());
+        }
+    }
+
+    private static String md5OfFile(String path) {
+        try (java.io.FileInputStream in = new java.io.FileInputStream(path)) {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            byte[] buf = new byte[256 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
+            byte[] d = md.digest();
+            char[] hex = "0123456789abcdef".toCharArray();
+            char[] out = new char[d.length * 2];
+            for (int i = 0; i < d.length; i++) {
+                int v = d[i] & 0xFF;
+                out[i * 2] = hex[v >>> 4];
+                out[i * 2 + 1] = hex[v & 0xF];
+            }
+            return new String(out);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     public static int md5LiveCount() {
         ensureMd5Loaded();
         return md5Live.size();
@@ -370,6 +477,48 @@ public final class LivePhotoDetector {
     /** 从 MsgRecord 的 PicElement(或群文件 FileElement)里取内容 md5(跨重启/跨设备稳定),小写,取不到返回 null。 */
     public static String picMd5Of(Object msgRecord) {
         return picMd5OfAt(msgRecord, -1);
+    }
+
+    /** 第 idx 张图的原始文件大小(-1 表示第一张),与 {@link #elementPathOfAt} 同序。 */
+    public static long picFileSizeAt(Object msgRecord, int idx) {
+        if (msgRecord == null) return -1;
+        try {
+            Object elements = XposedHelpers.getObjectField(msgRecord, "elements");
+            if (!(elements instanceof List)) return -1;
+            int seen = 0;
+            long first = -1;
+            for (Object element : (List<?>) elements) {
+                if (element == null) continue;
+                Object pic;
+                try {
+                    pic = XposedHelpers.getObjectField(element, "picElement");
+                } catch (Throwable ignored) {
+                    pic = null;
+                }
+                long size = -1;
+                if (pic != null) {
+                    Object v = XposedHelpers.getObjectField(pic, "fileSize");
+                    if (v instanceof Number) size = ((Number) v).longValue();
+                } else {
+                    Object file;
+                    try {
+                        file = XposedHelpers.getObjectField(element, "fileElement");
+                    } catch (Throwable ignored) {
+                        file = null;
+                    }
+                    if (file != null) {
+                        Object v = XposedHelpers.getObjectField(file, "fileSize");
+                        if (v instanceof Number) size = ((Number) v).longValue();
+                    }
+                }
+                if (size <= 0) continue;
+                if (first < 0) first = size;
+                if (seen++ == idx) return size;
+            }
+            return idx <= 0 ? first : -1;
+        } catch (Throwable ignored) {
+        }
+        return -1;
     }
 
     /** 第 idx 张图的 md5(-1 表示第一张),与 {@link #elementPathOfAt} 同序。 */

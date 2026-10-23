@@ -122,15 +122,23 @@ public final class LiveBadgeHook {
         int picN = LivePhotoDetector.picCount(msgRecord);
         if (picN > 1) {
             BadgeInjector.hide(root);
+            Log.i("multi-pic bind: msgId=" + msgId + " pics=" + picN);
             for (int i = 0; i < picN; i++) {
                 String p = LivePhotoDetector.elementPathOfAt(msgRecord, i);
-                if (p == null) continue;
-                if (LivePhotoDetector.isKnownLivePath(p)
-                        || LivePhotoDetector.isKnownLiveMd5At(msgRecord, i)) {
+                boolean knownPath = LivePhotoDetector.isKnownLivePath(p);
+                // sourcePath 可能为空(原图未下载),但 md5 库1 命中同样能证明这张是实况
+                boolean knownMd5 = LivePhotoDetector.isKnownLiveMd5At(msgRecord, i);
+                Log.i("multi-pic #" + i + " path=" + p + " size="
+                        + LivePhotoDetector.picFileSizeAt(msgRecord, i) + " knownPath=" + knownPath
+                        + " knownMd5=" + knownMd5);
+                if (knownPath || knownMd5) {
                     if (msgId != null) LivePhotoDetector.liveMsgIds.add(msgId);
                     BadgeInjector.show(root, i);
-                } else {
+                } else if (p != null) {
                     LivePhotoDetector.detectAsyncAt(p, msgRecord, root, i);
+                } else {
+                    // sourcePath 为空:按 fileSize+md5 去 chatraw 里找这张图的原图
+                    LivePhotoDetector.resolvePathByMetaAsync(msgRecord, root, i);
                 }
             }
             return;
