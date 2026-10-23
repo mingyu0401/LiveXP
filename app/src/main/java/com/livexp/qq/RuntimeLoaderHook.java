@@ -72,8 +72,9 @@ public final class RuntimeLoaderHook {
         XposedBridge.hookMethod(attach, new XC_MethodHook() {
             @Override
             protected void afterHookedMethod(MethodHookParam param) {
-                if (captured.get() || started.get()) return;
                 Context ctx = (Context) param.args[0];
+                if (ctx != null) HookEntry.appCtx = ctx;
+                if (captured.get() || started.get()) return;
                 Log.i("hotfix loader not captured at attach end, fallback to context classloader");
                 HookEntry.startHooks(ctx.getClassLoader());
             }

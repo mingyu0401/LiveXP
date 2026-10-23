@@ -1,5 +1,7 @@
 package com.livexp.qq;
 
+import android.content.Context;
+
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
@@ -9,6 +11,8 @@ public class HookEntry implements IXposedHookLoadPackage {
     static final String TAG = "LiveXP";
     /** base.apk 加载器(androidx 等库类可能在这里,热更加载器找不到时兜底)。 */
     static volatile ClassLoader baseCl;
+    /** QQ 进程的 Application Context(attachBaseContext 阶段捕获),状态桥要用它发广播。 */
+    static volatile Context appCtx;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -53,6 +57,11 @@ public class HookEntry implements IXposedHookLoadPackage {
             SettingsEntryHook.install(realCl);
         } catch (Throwable t) {
             Log.i("settings entry failed: " + t);
+        }
+        try {
+            StatusBridge.start();
+        } catch (Throwable t) {
+            Log.i("status bridge failed: " + t);
         }
     }
 

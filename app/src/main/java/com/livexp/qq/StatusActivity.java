@@ -1,30 +1,50 @@
 package com.livexp.qq;
 
 import android.app.Activity;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.ViewGroup;
 import android.webkit.WebView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import org.json.JSONObject;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.util.ArrayDeque;
 
-/** LiveXP 独立 App:与 QQ 设置页二级页同款关于界面;「查看运行日志」切入日志视图。 */
+/**
+ * LiveXP 独立 App:与 QQ 设置页同款关于界面;「查看运行日志」切入日志视图。
+ * 关键差异:这里要判断模块是否真的被 LSPosed 启用 —— 向 QQ 进程发探活广播,
+ * 模块收到后回一条状态(同时带上实际 LSPosed/QQ 版本),超时没回就算未激活。
+ */
 public class StatusActivity extends Activity {
 
-    // 日志在 QQ 进程内写入 QQ 自己的数据目录;本 App 不是 QQ,拿不到该路径,
-    // 看日志请用 QQ 设置页的「LiveXP 模块」→ 查看运行日志(QQ 进程内可读自己的数据目录)。
+    /** 日志在 QQ 进程内写入 QQ 自己的数据目录;本 App 拿不到该路径时会给出提示。 */
     private static final File LOG_FILE = new File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/livexp.log");
+    private static final String QQ_PKG = "com.tencent.mobileqq";
+    /** 探活等待时长:模块进程响应通常在几十毫秒内,1.2s 足够覆盖冷启动。 */
+    private static final long PING_WAIT_MS = 1200;
+    /** 页面停留期间的复查间隔:QQ 后启动/模块后启用也能自己变回来。 */
+    private static final long REFRESH_MS = 5000;
 
+    private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout root;
     private WebView web;
     private boolean dark;
+    private boolean resumed;
+    private boolean pageLoaded;
+    private long checkSeq;
+    private boolean stateActive;
+    private String stateVer = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -35,6 +55,20 @@ public class StatusActivity extends Activity {
         root.setBackgroundColor(dark ? Color.rgb(0x0D, 0x11, 0x17) : Color.rgb(0xF6, 0xF8, 0xFA));
         setContentView(root);
         showAbout();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        resumed = true;
+        handler.postDelayed(this::checkActive, 200);
+    }
+
+    @Override
+    protected void onPause() {
+        resumed = false;
+        handler.removeCallbacksAndMessages(null);
+        super.onPause();
     }
 
     @Override
@@ -49,6 +83,7 @@ public class StatusActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
         if (web != null) web.destroy();
         super.onDestroy();
     }
@@ -60,6 +95,14 @@ public class StatusActivity extends Activity {
             web = null;
         }
         root.removeAllViews();
+        pageLoaded = false;
+
+        SharedPreferences sp = getSharedPreferences(StatusReceiver.PREFS, MODE_PRIVATE);
+        boolean cached = sp.getLong("ts", 0) > 0;
+        String ver = cached ? activeVer(sp) : idleVer(sp);
+        stateActive = cached;
+        stateVer = ver;
+
         WebView page = ModuleAboutPage.createWebView(this, new ModuleAboutPage.Actions() {
             @Override
             public void openLogs() {
@@ -70,14 +113,76 @@ public class StatusActivity extends Activity {
             public void openSupport() {
                 ModuleAboutPage.showSupportDialog(StatusActivity.this);
             }
+        }, () -> {
+            pageLoaded = true;
+            applyState(stateActive, stateVer);
         });
         root.addView(page, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         this.web = page;
-        page.loadDataWithBaseURL(null, ModuleAboutPage.pageHtml(this), "text/html", "utf-8", null);
+        page.loadDataWithBaseURL(null, ModuleAboutPage.appHtml(this, dark, cached, ver),
+                "text/html", "utf-8", null);
+    }
+
+    /** 发一次探活广播,等模块回状态;无论结果如何都排下一次复查。 */
+    private void checkActive() {
+        if (!resumed) return;
+        final long wall = System.currentTimeMillis();
+        final long seq = ++checkSeq;
+        try {
+            Intent ping = new Intent(StatusBridge.ACTION_PING);
+            ping.setPackage(QQ_PKG);
+            sendBroadcast(ping);
+        } catch (Throwable ignored) {
+        }
+        handler.postDelayed(() -> {
+            if (!resumed || seq != checkSeq) return;
+            SharedPreferences sp = getSharedPreferences(StatusReceiver.PREFS, MODE_PRIVATE);
+            boolean active = sp.getLong("ts", 0) >= wall;
+            String ver = active ? activeVer(sp) : idleVer(sp);
+            stateActive = active;
+            stateVer = ver;
+            applyState(active, ver);
+            handler.postDelayed(this::checkActive, REFRESH_MS);
+        }, PING_WAIT_MS);
+    }
+
+    /** 把状态推给页面:只改 DOM,不整页重载,避免闪烁。 */
+    private void applyState(boolean active, String ver) {
+        if (web == null || !pageLoaded) return;
+        try {
+            web.evaluateJavascript("livexpState(" + active + "," + JSONObject.quote(ver) + ")", null);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 激活时的副标题:LSPosed 实际版本 + API(版本由 QQ 进程里的模块上报)。 */
+    private static String activeVer(SharedPreferences sp) {
+        String v = sp.getString("lsposed", null);
+        int api = sp.getInt("api", -1);
+        StringBuilder sb = new StringBuilder("LSPosed");
+        if (v != null && !v.isEmpty()) sb.append(' ').append(v);
+        if (api > 0) sb.append(", API ").append(api);
+        return sb.toString();
+    }
+
+    /** 未激活时的副标题:本机实际 QQ 版本,读不到就退回上次上报值。 */
+    private String idleVer(SharedPreferences sp) {
+        String qq = readQqVersion();
+        if (qq == null) qq = sp.getString("qq", null);
+        return qq == null ? "for QQ (NT)" : "for QQ " + qq + " (NT)";
+    }
+
+    private String readQqVersion() {
+        try {
+            return getPackageManager().getPackageInfo(QQ_PKG, 0).versionName;
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private void showLogs() {
+        handler.removeCallbacksAndMessages(null);
         if (web != null) {
             root.removeView(web);
             web.destroy();

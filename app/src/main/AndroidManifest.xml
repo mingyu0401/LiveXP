@@ -3,6 +3,12 @@
 
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- 独立 App 要读 QQ 的实际版本号(Android 11+ 需要声明可见性) -->
+    <queries>
+        <package android:name="com.tencent.mobileqq" />
+    </queries>
 
     <application
         android:label="@string/app_name"
@@ -19,6 +25,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 接收 QQ 进程里模块发来的激活心跳 -->
+        <receiver
+            android:name=".StatusReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.livexp.qq.STATUS" />
+            </intent-filter>
+        </receiver>
 
         <meta-data
             android:name="xposedmodule"
