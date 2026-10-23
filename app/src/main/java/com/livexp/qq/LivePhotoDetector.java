@@ -143,6 +143,29 @@ public final class LivePhotoDetector {
         return p != null && (p.contains("/chatthumb/") || p.endsWith("_hd"));
     }
 
+    /** 同一 msgId 的气泡登记原图(已确认优先,其次未判定候选);压缩缓存不算。 */
+    public static String boundPathFor(String msgId) {
+        BindAnchor a = bindOf(msgId);
+        if (a == null || a.path == null) return null;
+        if (isThumbPath(a.path) || isCompressedPath(a.path)) return null;
+        return a.path;
+    }
+
+    public static String boundMd5For(String msgId) {
+        BindAnchor a = bindOf(msgId);
+        return a == null ? null : a.md5;
+    }
+
+    private static BindAnchor bindOf(String msgId) {
+        if (msgId == null) return null;
+        String base = msgId;
+        int us = base.indexOf('_');
+        if (us > 0) base = base.substring(0, us);
+        BindAnchor a = liveBinds.get(base);
+        if (a == null) a = candidates.get(base);
+        return a;
+    }
+
     /** 压缩缓存(chatimg/chatthumb):内容不是原图,不能据此判定为静态并写库。 */
     public static boolean isCompressedPath(String p) {
         return p != null && (p.contains("/chatimg/") || p.contains("/chatthumb/"));

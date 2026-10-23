@@ -419,6 +419,15 @@ public final class LiveVideoPlayer {
                 return;
             }
         }
+        // 相册只给压缩缓存时,同一 msgId 的气泡登记通常已有原图路径(即使还没下载也先占位等落盘)
+        if (LivePhotoDetector.isCompressedPath(path) && !isMultiPicMessage(msgId)) {
+            String bindPath = LivePhotoDetector.boundPathFor(msgId);
+            if (bindPath != null) {
+                Log.i("compressed page replaced by bind original: " + bindPath);
+                path = bindPath;
+                if (md5 == null) md5 = LivePhotoDetector.boundMd5For(msgId);
+            }
+        }
         // chatimg 是压缩缓存,不是原图:QQ 可能正在下载原图,先等路径换成原图再判定
         if (LivePhotoDetector.isCompressedPath(path)) {
             Log.i("page has compressed cache, wait for original: " + path + " msgId=" + msgId);
@@ -454,6 +463,21 @@ public final class LiveVideoPlayer {
     /** 页码→路径未知时,后台深挖当前居中页 View 的对象图找 MsgRecord 或图片路径。 */
     private static void resolvePageFromView(final int pos) {
         resolvePageFromView(pos, false);
+    }
+
+    /** 同一 msgId 在相册里出现多次即为多图消息,气泡登记里的路径只对应第一张。 */
+    private static boolean isMultiPicMessage(String msgId) {
+        if (msgId == null) return false;
+        String base = msgId;
+        int us = base.indexOf('_');
+        if (us > 0) base = base.substring(0, us);
+        java.util.List<String> ids = albumIds;
+        if (ids == null) return false;
+        int n = 0;
+        for (String id : ids) {
+            if (id != null && (id.equals(base) || id.startsWith(base + "_"))) n++;
+        }
+        return n > 1;
     }
 
     /** force=true 供"等原图下载完再补播"的轮询使用,不受 viewScanned 一次限制。 */
@@ -533,6 +557,9 @@ public final class LiveVideoPlayer {
                         : (old == null ? null : old.rec);
                 int idx = old != null ? old.picIndex : 0;
                 String path = fresh == null ? null : fresh.path;
+                Log.i("page refresh: pos=" + pos + " fresh=" + path
+                        + " rec=" + (rec != null) + " pic=" + (fresh != null && fresh.pic != null)
+                        + " idx=" + idx);
                 String prev = pagePath.get(pos);
                 if (prev == null && old != null) prev = old.path;
                 if (path == null || LivePhotoDetector.isThumbPath(path)
