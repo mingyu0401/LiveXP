@@ -164,6 +164,16 @@ public final class SettingsEntryHook {
         if (!(resultObj instanceof List)) return;
         List<Object> result = (List<Object>) resultObj;
         if (result.isEmpty()) return;
+
+        // 只在「设置」主页插入口。账号与安全等二级页同样继承 SettingConfigProvider
+        // (如 com.tencent.mobileqq.account.provider.AccountManagerConfigProvider),
+        // 不按包名限定会到处多出一个「LiveXP 模块」按钮。
+        String declaring = param.method.getDeclaringClass().getName();
+        if (!declaring.startsWith(PROVIDER_PKG)) {
+            Log.i("skip non-main settings list: " + declaring);
+            return;
+        }
+
         for (Object o : result) {
             if (o != null && String.valueOf(o).contains("LiveXP")) {
                 return;

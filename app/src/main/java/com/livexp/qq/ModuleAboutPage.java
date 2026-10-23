@@ -249,31 +249,43 @@ public final class ModuleAboutPage {
                         "https://github.com/cinit/QAuxiliary", false))
                 .append(creditRow("FUNBOX", "本人最喜欢的模块,给了我很大的动力。",
                         null, true))
-                .append(creditRow("LSPosed", "模块的运行平台,作用域配置、入口与类加载器机制都由它提供。",
-                        "https://github.com/LSPosed/LSPosed", false))
-                .append(creditRow("XposedBridge (Xposed API 82)", "编译期依赖 de.robv.android.xposed:api,模块所有 hook 的接口来源。",
-                        "https://github.com/rovo89/XposedBridge", false))
-                .append(creditRow("AndroidX", "ConstraintLayout 等组件,以 compileOnly 方式参与编译。",
-                        "https://github.com/androidx/androidx", false))
-                .append(creditRow("jadx", "反编译 QQ、定位混淆锚点与核对调用链时使用的工具。",
-                        "https://github.com/skylot/jadx", false))
+                .append(creditRow("LSPosed", null, "https://github.com/LSPosed/LSPosed", false))
+                .append(creditRow("XposedBridge (Xposed API 82)", null, "https://github.com/rovo89/XposedBridge", false))
+                .append(creditRow("AndroidX", null, "https://github.com/androidx/androidx", false))
+                .append(creditRow("等等", null, null, false))
                 .append("<div class='secFoot'>LiveXP 自身以 GPL-3.0 协议开源,完整条文见仓库根目录 LICENSE 文件。<br>"
                         + "以上项目版权归各自作者所有,本模块仅在运行时依赖或借鉴其公开实现。</div>")
                 .append("</div>");
         return sb.toString();
     }
 
-    /** 一行致谢:url 为空表示没有开源地址,渲染为不可点条目。 */
+    /** 一行致谢:url 为空表示不可点条目;descText 为空时不渲染小字介绍。 */
     private static String creditRow(String name, String descText, String url, boolean favorite) {
         String cls = "cl" + (favorite ? " fav" : "") + (url == null ? " plain" : "");
         String inner = "<div class='clMain'><div class='nm'>" + name
                 + (favorite ? "<span class='star'>&#9733; 最爱</span>" : "") + "</div>"
-                + "<div class='ds'>" + descText + "</div></div>";
-        String tail = url == null ? "<div class='go'>无开源</div>" : "<div class='go'>&#8599;</div>";
+                + (descText == null || descText.isEmpty() ? "" : "<div class='ds'>" + descText + "</div>")
+                + "</div>";
+        String tail = url == null ? "" : "<div class='go'>&#8599;</div>";
         if (url == null) {
             return "<div class='" + cls + "'>" + inner + tail + "</div>";
         }
         return "<a class='" + cls + "' href='" + copyHref(url) + "&open=1'>" + inner + tail + "</a>";
+    }
+
+    /** 赞助码已从 APK 内移出,统一放在仓库的 DONATE.md,这里只给 GitHub 图标和地址。 */
+    private static final String DONATE_URL = "https://github.com/mingyu0401/LiveXP/blob/main/DONATE.md";
+
+    private static String githubSvg() {
+        return "<svg viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'><path d='M12 .297c-6.63 0-12 "
+                + "5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04"
+                + "-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 "
+                + "1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605"
+                + "-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 "
+                + "1.005-.322 3.3 1.23.96-.267 1.98-.405 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 "
+                + "3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 "
+                + "5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 "
+                + "24 17.592 24 12.297c0-6.627-5.373-12-12-12'/></svg>";
     }
 
     private static String supportHtml(boolean dark) {
@@ -282,7 +294,9 @@ public final class ModuleAboutPage {
         String btnBg = dark ? "#30363d" : "#eaeef2";
         String btnText = dark ? "#9aa0a8" : "#57606a";
         String btnActive = dark ? "#3d444d" : "#dfe3e8";
-        String qrBorder = dark ? "none" : "1px solid rgba(0,0,0,.1)";
+        String ghBg = dark ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.04)";
+        String ghBorder = dark ? "rgba(255,255,255,.14)" : "rgba(0,0,0,.1)";
+        String ghFill = dark ? "#e6edf3" : "#1f2328";
         return "<!DOCTYPE html><html><head><meta charset='utf-8'>"
                 + "<meta name='viewport' content='width=device-width,initial-scale=1'>"
                 + "<style>"
@@ -294,9 +308,13 @@ public final class ModuleAboutPage {
                 + "-webkit-background-clip:text;background-clip:text;color:transparent;background-size:200% 100%;"
                 + "animation:shift 5s linear infinite}"
                 + "@keyframes shift{to{background-position:200% 0}}"
-                + ".txt{color:" + txt + ";font-size:16px;line-height:1.9;text-align:center;max-width:460px;margin-bottom:24px}"
-                + ".qr{background:#fff;border:" + qrBorder + ";border-radius:16px;padding:14px;margin-bottom:28px}"
-                + ".qr img{width:min(64vw,300px);height:auto;display:block}"
+                + ".txt{color:" + txt + ";font-size:16px;line-height:1.9;text-align:center;max-width:460px;margin-bottom:26px}"
+                + "a.gh{display:flex;align-items:center;justify-content:center;width:146px;height:146px;border-radius:50%;"
+                + "background:" + ghBg + ";border:1px solid " + ghBorder + ";margin-bottom:16px;transition:background .2s}"
+                + "a.gh:active{background:" + btnActive + "}"
+                + "a.gh svg{width:84px;height:84px;fill:" + ghFill + "}"
+                + "a.ghurl{display:block;max-width:430px;font-size:12px;line-height:1.7;color:" + btnText + ";"
+                + "font-family:monospace;text-align:center;word-break:break-all;text-decoration:none;margin-bottom:30px}"
                 + "a.btn{display:block;text-align:center;width:220px;padding:12px 0;border-radius:12px;"
                 + "background:" + btnBg + ";color:" + btnText + ";font-size:15px;text-decoration:none;transition:background .2s}"
                 + "a.btn:active{background:" + btnActive + "}"
@@ -304,8 +322,10 @@ public final class ModuleAboutPage {
                 + "<h1>支持作者</h1>"
                 + "<div class='txt'>作者大学牲,精力和 token 来之不易。<br>"
                 + "如果您觉得这个模块好用,可以请作者喝一杯咖啡&#9749;<br>"
-                + "LiveXP功能免费,自愿赞赏,感谢支持.<br>您的支持是我更新的动力!</div>"
-                + "<div class='qr'><img src='data:image/webp;base64," + SupportAssets.QR_WEBP_BASE64 + "'/></div>"
+                + "LiveXP 功能免费,自愿赞赏,感谢支持。<br>赞助码已移到仓库的 DONATE.md,点图标或地址即可打开。</div>"
+                + "<a class='gh' href='" + copyHref(DONATE_URL) + "&open=1'>" + githubSvg() + "</a>"
+                + "<a class='ghurl' href='" + copyHref(DONATE_URL) + "&open=1'>"
+                + "github.com/mingyu0401/LiveXP/blob/main/DONATE.md</a>"
                 + "<a class='btn' href='livexp://close'>下次一定</a>"
                 + "</body></html>";
     }

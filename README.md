@@ -2,7 +2,7 @@
 
 QQ(NT 内核) 的 LSPosed 模块:在聊天界面检测**实况图片**(Live Photo / Motion Photo),给对应气泡加「实况」点环角标;点开大图自动播放内嵌动态视频。
 
-> **当前版本 v1.51**(versionCode 52)
+> **当前版本 v1.52**(versionCode 53)
 > 判定规则依赖真机校准,QQ 版本升级后混淆锚点可能漂移,届时需要重新定位。
 
 ## 功能
@@ -33,8 +33,8 @@ LSPosed 里启用模块并勾选 QQ 作用域,重启 QQ:
 ## 致谢与开源说明
 
 - **FUNBOX** —— 本人最喜欢的模块,给了我很大的动力。
-- **[QA 模块](https://github.com/cinit/QAuxiliary)** —— 提供了实现思路,LiveXP 的不少做法参考自它。
-- [LSPosed](https://github.com/LSPosed/LSPosed)、[XposedBridge](https://github.com/rovo89/XposedBridge)、[AndroidX](https://github.com/androidx/androidx)、[jadx](https://github.com/skylot/jadx) —— 运行平台、API、组件与反编译工具。
+- **[QA 模块](https://github.com/cinit/QAuxiliary)** —— 提供了实现思路。
+- [LSPosed](https://github.com/LSPosed/LSPosed)、[XposedBridge](https://github.com/rovo89/XposedBridge)、[AndroidX](https://github.com/androidx/androidx) 等等。
 
 完整清单也在模块关于页底部的「致谢和开源使用说明」里。以上项目版权归各自作者所有。
 
@@ -43,3 +43,10 @@ LSPosed 里启用模块并勾选 QQ 作用域,重启 QQ:
 本项目以 [GPL-3.0](LICENSE) 协议开源,Copyright (C) 2026 明雨 (mingyu0401)。
 
 分发或修改后的版本需同样以 GPL-3.0 开源并提供源码。仅供学习与个人使用,请勿用于修改 QQ 服务器数据或商业用途。
+
+## 赞助
+
+功能免费,自愿赞赏,不打赏也完全不影响使用。想请作者喝杯咖啡就扫下面这个码(图片同样在 [DONATE.md](DONATE.md) 里):
+
+<img src="assets/donate-qr.webp" width="280" alt="明雨的赞赏码">
+
