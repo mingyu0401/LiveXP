@@ -10,9 +10,16 @@ public final class LiveMarkView extends View {
 
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final float fillRatio;
 
     public LiveMarkView(Context c) {
+        this(c, 0.58f);
+    }
+
+    /** fillRatio = 图案外径占视图短边的比例(1.0 会贴边)。 */
+    public LiveMarkView(Context c, float fillRatio) {
         super(c);
+        this.fillRatio = fillRatio;
         fill.setColor(0xFFFFFFFF);
         fill.setStyle(Paint.Style.FILL);
         stroke.setColor(0xFFFFFFFF);
@@ -22,7 +29,7 @@ public final class LiveMarkView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         float w = getWidth(), h = getHeight();
-        float scale = Math.min(w, h) * 0.58f / 200f;
+        float scale = Math.min(w, h) * fillRatio / 200f;
         canvas.save();
         canvas.translate(w / 2f, h / 2f);
         canvas.scale(scale, scale);

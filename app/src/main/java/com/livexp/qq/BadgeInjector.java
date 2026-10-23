@@ -39,9 +39,9 @@ public final class BadgeInjector {
         bg.setColor(0x99000000);
         bg.setCornerRadius(dp(ctx, 7));
         badge.setBackground(bg);
-        LiveMarkView mark = new LiveMarkView(ctx);
+        LiveMarkView mark = new LiveMarkView(ctx, 0.94f);
         badge.addView(mark, new FrameLayout.LayoutParams(
-                dp(ctx, 18), dp(ctx, 18), Gravity.CENTER));
+                dp(ctx, 20), dp(ctx, 20), Gravity.CENTER));
         root.addView(badge);
         int size = dp(ctx, 24);
         ViewGroup.LayoutParams lp = badge.getLayoutParams();
