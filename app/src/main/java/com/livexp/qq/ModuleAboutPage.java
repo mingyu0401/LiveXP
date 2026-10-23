@@ -206,10 +206,9 @@ public final class ModuleAboutPage {
                 + ".cl .nm{font-size:14px;font-weight:bold;display:flex;align-items:center;gap:7px;flex-wrap:wrap}"
                 + ".cl .ds{font-size:11.5px;color:" + sub + ";line-height:1.65;margin-top:3px}"
                 + ".cl .go{margin-left:auto;color:" + sub + ";font-size:12px;padding-top:1px;white-space:nowrap;flex:none}"
-                + ".cl.plain .nm{color:" + desc + "}"
                 + ".star{font-size:9.5px;font-weight:bold;color:#0d1117;padding:1px 5px;border-radius:5px;"
                 + "background:linear-gradient(135deg,#a78bfa,#38bdf8)}"
-                + "a.cl.fav{background:linear-gradient(100deg,rgba(167,139,250,.16),rgba(56,189,248,.05));"
+                + "a.cl.fav,div.cl.fav{background:linear-gradient(100deg,rgba(167,139,250,.16),rgba(56,189,248,.05));"
                 + "border:1px solid rgba(167,139,250,.38);border-radius:12px;padding:12px;margin-bottom:4px}"
                 + ".secFoot{font-size:11px;color:" + sub + ";line-height:1.7;margin-top:14px;opacity:.85}"
                 + ".foot{margin-top:auto;padding-top:30px}"
@@ -237,7 +236,7 @@ public final class ModuleAboutPage {
     }
 
     /**
-     * 致谢和开源使用说明:首项 QA 模块(作者最喜欢的模块),次项 FUNBOX(无开源地址),
+     * 致谢和开源使用说明:首项 QA 模块(提供实现思路),次项 FUNBOX(作者最喜欢的模块,无开源地址),
      * 其余为可能用到的项目,逐个附 GitHub 链接。点按条目复制地址,独立 App 内同时尝试打开。
      */
     private static String credits(String sub, String cardBorder) {
@@ -246,10 +245,10 @@ public final class ModuleAboutPage {
                 .append("<div class='secH'>致谢和开源使用说明<span class='tag'>可选</span></div>")
                 .append("<div class='secTip'>LiveXP 是站在别人肩膀上的一次尝试。下面这些人和项目让作者少走了很多弯路,"
                         + "点按条目可复制地址(独立 App 内会同时打开浏览器)。</div>")
-                .append(creditRow("QA 模块", "本人最喜欢的模块,给了我很大的动力 —— LiveXP 的很多交互和实现思路都受它启发。",
-                        "https://github.com/cinit/QAuxiliary", true))
-                .append(creditRow("FUNBOX", "同样好用的模块,可惜没有开源地址,只能在这里口头致谢。",
-                        null, false))
+                .append(creditRow("QA 模块", "提供了实现思路,LiveXP 的不少做法参考自它。",
+                        "https://github.com/cinit/QAuxiliary", false))
+                .append(creditRow("FUNBOX", "本人最喜欢的模块,给了我很大的动力。",
+                        null, true))
                 .append(creditRow("LSPosed", "模块的运行平台,作用域配置、入口与类加载器机制都由它提供。",
                         "https://github.com/LSPosed/LSPosed", false))
                 .append(creditRow("XposedBridge (Xposed API 82)", "编译期依赖 de.robv.android.xposed:api,模块所有 hook 的接口来源。",
@@ -266,15 +265,15 @@ public final class ModuleAboutPage {
 
     /** 一行致谢:url 为空表示没有开源地址,渲染为不可点条目。 */
     private static String creditRow(String name, String descText, String url, boolean favorite) {
+        String cls = "cl" + (favorite ? " fav" : "") + (url == null ? " plain" : "");
         String inner = "<div class='clMain'><div class='nm'>" + name
                 + (favorite ? "<span class='star'>&#9733; 最爱</span>" : "") + "</div>"
                 + "<div class='ds'>" + descText + "</div></div>";
         String tail = url == null ? "<div class='go'>无开源</div>" : "<div class='go'>&#8599;</div>";
         if (url == null) {
-            return "<div class='cl plain'>" + inner + tail + "</div>";
+            return "<div class='" + cls + "'>" + inner + tail + "</div>";
         }
-        return "<a class='cl" + (favorite ? " fav" : "") + "' href='" + copyHref(url) + "&open=1'>"
-                + inner + tail + "</a>";
+        return "<a class='" + cls + "' href='" + copyHref(url) + "&open=1'>" + inner + tail + "</a>";
     }
 
     private static String supportHtml(boolean dark) {
