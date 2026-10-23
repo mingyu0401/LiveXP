@@ -118,6 +118,23 @@ public final class LiveBadgeHook {
             return;
         }
         String msgId = LivePhotoDetector.msgIdOf(msgRecord);
+        // 一条气泡多张图:逐张判定、逐张贴标(消息级快速路径会把两张图当成一张)
+        int picN = LivePhotoDetector.picCount(msgRecord);
+        if (picN > 1) {
+            BadgeInjector.hide(root);
+            for (int i = 0; i < picN; i++) {
+                String p = LivePhotoDetector.elementPathOfAt(msgRecord, i);
+                if (p == null) continue;
+                if (LivePhotoDetector.isKnownLivePath(p)
+                        || LivePhotoDetector.isKnownLiveMd5At(msgRecord, i)) {
+                    if (msgId != null) LivePhotoDetector.liveMsgIds.add(msgId);
+                    BadgeInjector.show(root, i);
+                } else {
+                    LivePhotoDetector.detectAsyncAt(p, msgRecord, root, i);
+                }
+            }
+            return;
+        }
         if (msgId != null && LivePhotoDetector.liveMsgIds.contains(msgId)) {
             BadgeInjector.show(root);
             LivePhotoDetector.noteLiveBind(msgRecord, root, msgItem);

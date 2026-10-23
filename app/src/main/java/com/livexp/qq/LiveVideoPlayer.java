@@ -40,6 +40,8 @@ public final class LiveVideoPlayer {
     private static final long PENDING_FRESH_MS = 8000;
     /** 等相册页码映射的最长时间,超时才退回 thumb-bound 反查。 */
     private static final long INITIAL_ALBUM_WAIT_MS = 1500;
+    /** QQ 查看器打开过渡动画时长,期间不自动播放(真机按观感取 350ms)。 */
+    private static final long OPEN_TRANSITION_MS = 350;
     private static final File CACHE_DIR =
             new File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/video_cache");
 
@@ -71,6 +73,8 @@ public final class LiveVideoPlayer {
     private static volatile Match initialMatch;
     private static volatile boolean initialResolved;
     private static volatile int initialSeq;
+    /** 首屏自动播放的最早时间:等 QQ 打开查看器的过渡动画放完再起播。 */
+    private static volatile long initialPlayNotBefore;
     private static final Map<Integer, Object> pageRec = new ConcurrentHashMap<>();
     private static final Map<Integer, String> pagePath = new ConcurrentHashMap<>();
     /** 已经对某一页做过 View 对象图兜底扫描,避免"缩略图→扫描→还是缩略图"来回打转。 */
@@ -95,6 +99,7 @@ public final class LiveVideoPlayer {
             galleryRef = activity;
             initialSeq++;
             initialResolved = false;
+            initialPlayNotBefore = SystemClock.uptimeMillis() + OPEN_TRANSITION_MS;
             setupPager(activity);   // 先定好 currentItem 并启动相册扫描
             String p = pendingPath;
             if (p != null && SystemClock.uptimeMillis() - pendingAt < PENDING_FRESH_MS) {
@@ -121,6 +126,11 @@ public final class LiveVideoPlayer {
         try {
             Activity a = galleryRef;
             if (a == null || a.isFinishing() || initialResolved || seq != initialSeq) return;
+            long wait = initialPlayNotBefore - SystemClock.uptimeMillis();
+            if (wait > 0) {
+                MAIN.postDelayed(() -> resolveInitialPage(deadline, seq), wait);
+                return;
+            }
             java.util.List<String> paths = albumPaths;
             int pos = lastSettledPos;
             if (paths != null && pos >= 0 && pos < paths.size()) {
@@ -382,8 +392,13 @@ public final class LiveVideoPlayer {
                 return;
             }
         }
-        boolean known = (msgId != null && LivePhotoDetector.liveMsgIds.contains(msgId))
-                || LivePhotoDetector.isKnownLiveOpen(path, d.rec);
+        // 多图消息不能按消息级 liveMsgIds 判定:同一气泡里可能只有一张是实况
+        boolean multiPic = LivePhotoDetector.picCount(d.rec) > 1;
+        boolean known = multiPic
+                ? LivePhotoDetector.isKnownLivePath(path)
+                        || LivePhotoDetector.isKnownLiveMd5At(d.rec, d.picIndex)
+                : (msgId != null && LivePhotoDetector.liveMsgIds.contains(msgId))
+                        || LivePhotoDetector.isKnownLiveOpen(path, d.rec);
         if (known || Boolean.TRUE.equals(d.live)) {
             currentSrc = path;
             installButton(act);
@@ -1066,6 +1081,25 @@ public final class LiveVideoPlayer {
         });
     }
 
+    /** 截当前居中页(缩小一半省内存),用作视频首帧出来前的底图。 */
+    private static android.graphics.Bitmap captureCenterPage() {
+        try {
+            View page = centerPageView();
+            if (page == null || page.getWidth() <= 0 || page.getHeight() <= 0) return null;
+            int w = Math.max(1, page.getWidth() / 2);
+            int h = Math.max(1, page.getHeight() / 2);
+            android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
+                    w, h, android.graphics.Bitmap.Config.ARGB_8888);
+            android.graphics.Canvas canvas = new android.graphics.Canvas(bmp);
+            canvas.scale(0.5f, 0.5f);
+            page.draw(canvas);
+            return bmp;
+        } catch (Throwable t) {
+            Log.i("capture page error: " + t);
+            return null;
+        }
+    }
+
     private static void startOverlay(Activity activity, File vf) {
         try {
             removeOverlay();
@@ -1073,11 +1107,21 @@ public final class LiveVideoPlayer {
             if (act == null || act.isFinishing()) return;
             ViewGroup decor = (ViewGroup) act.getWindow().getDecorView();
             final FrameLayout container = new FrameLayout(act);
-            // 首帧出来前保持透明(露出下面的照片),避免挂上黑底到出画之间闪黑
-            container.setBackgroundColor(0x00000000);
+            // 首帧出来前用当前页的截图盖住:既不会闪黑,也不会因为查看器该页还没绘制
+            // 而透出底下的聊天界面(滑动后起播时实测有 0.2s 空窗)
+            final android.graphics.Bitmap shot = captureCenterPage();
+            final android.widget.ImageView cover = new android.widget.ImageView(act);
+            cover.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+            if (shot != null) {
+                cover.setImageBitmap(shot);
+            } else {
+                container.setBackgroundColor(0xFF000000);
+            }
+            container.addView(cover, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             VideoView video = new VideoView(act);
             try {
-                // 半透明 surface:没有帧时是透明的,不会先铺一层黑
+                // 半透明 surface:没有帧时是透明的,先露出上面的截图
                 video.getHolder().setFormat(android.graphics.PixelFormat.TRANSLUCENT);
             } catch (Throwable ignored) {
             }
@@ -1104,7 +1148,10 @@ public final class LiveVideoPlayer {
             });
             // 出画后恢复黑底,盖住查看器自己的按钮(否则透明底会露出它们)
             final Runnable blackout = () -> {
-                if (overlay == container) container.setBackgroundColor(0xFF000000);
+                if (overlay != container) return;
+                container.setBackgroundColor(0xFF000000);
+                if (cover.getParent() == container) container.removeView(cover);
+                if (shot != null && !shot.isRecycled()) shot.recycle();
             };
             video.setOnInfoListener((mp, what, extra) -> {
                 if (what == android.media.MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) blackout.run();

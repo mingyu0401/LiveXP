@@ -272,18 +272,24 @@ public final class LivePhotoDetector {
      * 命中后把消息 msgId 记入 liveMsgIds;若气泡还活着,直接在主线程补打标。
      */
     public static void detectAsync(String path, Object msgRecord, ViewGroup boundRoot) {
+        detectAsyncAt(path, msgRecord, boundRoot, -1);
+    }
+
+    /** 同上,但针对多图消息里的第 picIndex 张(-1 = 不区分,按第一张处理)。 */
+    public static void detectAsyncAt(String path, Object msgRecord, ViewGroup boundRoot,
+                                     final int picIndex) {
         if (path == null) return;
         Boolean known = pathVerdict.get(path);
         if (known != null) {
-            if (known) onLive(msgRecord, boundRoot);
+            if (known) onLiveAt(msgRecord, boundRoot, picIndex);
             return;
         }
         ensureMd5Loaded();
-        String md5 = picMd5Of(msgRecord);
+        String md5 = picMd5OfAt(msgRecord, picIndex);
         if (md5 != null) {
             if (md5Live.contains(md5)) {
                 Log.i("md5 lib1 hit: " + md5);
-                onLive(msgRecord, boundRoot);
+                onLiveAt(msgRecord, boundRoot, picIndex);
                 return;
             }
             if (md5Static.contains(md5)) {
@@ -308,7 +314,7 @@ public final class LivePhotoDetector {
                 if (exists && size >= MIN_DETECT_BYTES) recordMd5(md5, live);
                 if (live) {
                     liveHitCount++;
-                    Log.i("live photo detected: " + path);
+                    Log.i("live photo detected: " + path + (picIndex >= 0 ? " idx=" + picIndex : ""));
                     // 提升候选登记为实况登记,大图查看器缩略图匹配才能命中未点开过的图
                     if (msgId != null) {
                         BindAnchor cand = candidates.remove(msgId);
@@ -317,7 +323,7 @@ public final class LivePhotoDetector {
                             liveBinds.put(msgId, cand);
                         }
                     }
-                    onLive(msgRecord, rootRef == null ? null : rootRef.get());
+                    onLiveAt(msgRecord, rootRef == null ? null : rootRef.get(), picIndex);
                 }
             } catch (Throwable t) {
                 Log.i("detect error: " + t);
@@ -333,6 +339,18 @@ public final class LivePhotoDetector {
     public static int md5StaticCount() {
         ensureMd5Loaded();
         return md5Static.size();
+    }
+
+    /** 路径判定缓存里已确认是实况(多图消息逐张判定用)。 */
+    public static boolean isKnownLivePath(String path) {
+        return path != null && Boolean.TRUE.equals(pathVerdict.get(path));
+    }
+
+    /** 第 idx 张图的 md5 已在库1。 */
+    public static boolean isKnownLiveMd5At(Object msgRecord, int idx) {
+        ensureMd5Loaded();
+        String md5 = picMd5OfAt(msgRecord, idx);
+        return md5 != null && md5Live.contains(md5);
     }
 
     /** bind 快速路径:该图 md5 已在库1(实况)则无需扫描直接打标。 */
@@ -476,12 +494,12 @@ public final class LivePhotoDetector {
         }
     }
 
-    private static void onLive(Object msgRecord, ViewGroup boundRoot) {
+    private static void onLiveAt(Object msgRecord, ViewGroup boundRoot, int picIndex) {
         String msgId = msgRecord == null ? null : msgIdOf(msgRecord);
         if (msgId != null) liveMsgIds.add(msgId);
         if (boundRoot != null) {
             MAIN.post(() -> {
-                if (boundRoot.isAttachedToWindow()) BadgeInjector.show(boundRoot);
+                if (boundRoot.isAttachedToWindow()) BadgeInjector.show(boundRoot, picIndex);
             });
         }
     }
