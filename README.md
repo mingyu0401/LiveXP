@@ -57,6 +57,8 @@ LSPosed 里启用模块并勾选 QQ 作用域,重启 QQ:
 
 `/storage/emulated/0/Android/data/com.tencent.mobileqq/LiveXP/livexp.log`
 
+最好再附一段**视频或动图**示意 bug 的复现过程,比文字描述更容易定位。
+
 ## 致谢与开源说明
 
 - **Qoder 与 deepseek-v4.1-flash / glm-5.3-flash / qwen-3.8-flash** 还有我的小手机(一加 15) :)
