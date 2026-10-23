@@ -1081,25 +1081,6 @@ public final class LiveVideoPlayer {
         });
     }
 
-    /** 截当前居中页(缩小一半省内存),用作视频首帧出来前的底图。 */
-    private static android.graphics.Bitmap captureCenterPage() {
-        try {
-            View page = centerPageView();
-            if (page == null || page.getWidth() <= 0 || page.getHeight() <= 0) return null;
-            int w = Math.max(1, page.getWidth() / 2);
-            int h = Math.max(1, page.getHeight() / 2);
-            android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
-                    w, h, android.graphics.Bitmap.Config.ARGB_8888);
-            android.graphics.Canvas canvas = new android.graphics.Canvas(bmp);
-            canvas.scale(0.5f, 0.5f);
-            page.draw(canvas);
-            return bmp;
-        } catch (Throwable t) {
-            Log.i("capture page error: " + t);
-            return null;
-        }
-    }
-
     private static void startOverlay(Activity activity, File vf) {
         try {
             removeOverlay();
@@ -1107,24 +1088,9 @@ public final class LiveVideoPlayer {
             if (act == null || act.isFinishing()) return;
             ViewGroup decor = (ViewGroup) act.getWindow().getDecorView();
             final FrameLayout container = new FrameLayout(act);
-            // 首帧出来前用当前页的截图盖住:既不会闪黑,也不会因为查看器该页还没绘制
-            // 而透出底下的聊天界面(滑动后起播时实测有 0.2s 空窗)
-            final android.graphics.Bitmap shot = captureCenterPage();
-            final android.widget.ImageView cover = new android.widget.ImageView(act);
-            cover.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
-            if (shot != null) {
-                cover.setImageBitmap(shot);
-            } else {
-                container.setBackgroundColor(0xFF000000);
-            }
-            container.addView(cover, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            // 不透明黑底:盖住查看器自身按钮,首帧前也不会透出聊天界面
+            container.setBackgroundColor(0xFF000000);
             VideoView video = new VideoView(act);
-            try {
-                // 半透明 surface:没有帧时是透明的,先露出上面的截图
-                video.getHolder().setFormat(android.graphics.PixelFormat.TRANSLUCENT);
-            } catch (Throwable ignored) {
-            }
             FrameLayout.LayoutParams vlp = new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                     Gravity.CENTER);
@@ -1146,18 +1112,6 @@ public final class LiveVideoPlayer {
                 removeOverlay();
                 return true;
             });
-            // 出画后恢复黑底,盖住查看器自己的按钮(否则透明底会露出它们)
-            final Runnable blackout = () -> {
-                if (overlay != container) return;
-                container.setBackgroundColor(0xFF000000);
-                if (cover.getParent() == container) container.removeView(cover);
-                if (shot != null && !shot.isRecycled()) shot.recycle();
-            };
-            video.setOnInfoListener((mp, what, extra) -> {
-                if (what == android.media.MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) blackout.run();
-                return false;
-            });
-            MAIN.postDelayed(blackout, 700); // 回调不来也要恢复黑底
             video.setVideoURI(Uri.fromFile(vf));
             video.start();
             Log.i("playing overlay video");
