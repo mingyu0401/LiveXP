@@ -26,6 +26,25 @@ public final class ModuleAboutPage {
         void openSupport();
     }
 
+    /** JS 直接调用原生震动,避免 location.href 自定义协议在非用户手势回调里被 WebView 拦掉。 */
+    public static final class HapticBridge {
+        private final Context ctx;
+
+        HapticBridge(Context ctx) {
+            this.ctx = ctx;
+        }
+
+        @android.webkit.JavascriptInterface
+        public void buzz() {
+            Haptics.play(ctx);
+        }
+
+        @android.webkit.JavascriptInterface
+        public void stop() {
+            Haptics.stop();
+        }
+    }
+
     private ModuleAboutPage() {}
 
     /** 跟随系统夜间模式;取不到明确浅色状态时默认深色。 */
@@ -43,6 +62,9 @@ public final class ModuleAboutPage {
         WebView web = new WebView(ctx);
         web.setBackgroundColor(isDark(ctx) ? Color.rgb(0x0D, 0x11, 0x17) : Color.rgb(0xF6, 0xF8, 0xFA));
         web.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
+        // 长按彩蛋靠页面 JS 触发;WebView 默认关闭 JavaScript,之前一直没开导致看不到震动
+        web.getSettings().setJavaScriptEnabled(true);
+        web.addJavascriptInterface(new HapticBridge(ctx), "LiveXPHaptic");
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
@@ -320,15 +342,19 @@ public final class ModuleAboutPage {
                 + "if(v&&ver)v.textContent=ver;}"
                 + "(function(){"
                 + "var hero=document.getElementById('hero');if(!hero)return;"
-                + "var timer=null,fired=false;"
-                + "function buzz(){fired=true;try{location.href='livexp://haptic';}catch(e){}}"
-                + "function stopBuzz(){if(fired){fired=false;try{location.href='livexp://hapticstop';}catch(e){}}}"
-                + "hero.addEventListener('touchstart',function(){if(timer||fired)return;"
+                + "var timer=null,fired=false,sx=0,sy=0;"
+                + "function buzz(){fired=true;try{if(window.LiveXPHaptic){LiveXPHaptic.buzz();}else{location.href='livexp://haptic';}}catch(e){}}"
+                + "function stopBuzz(){if(fired){fired=false;try{if(window.LiveXPHaptic){LiveXPHaptic.stop();}else{location.href='livexp://hapticstop';}}catch(e){}}}"
+                + "hero.addEventListener('touchstart',function(e){if(timer||fired)return;"
+                + "var t=e.touches&&e.touches[0];if(t){sx=t.clientX;sy=t.clientY;}"
                 + "timer=setTimeout(function(){timer=null;buzz();},430);},{passive:true});"
                 + "hero.addEventListener('touchend',function(){if(timer){clearTimeout(timer);timer=null;}stopBuzz();});"
                 + "hero.addEventListener('touchcancel',function(){if(timer){clearTimeout(timer);timer=null;}stopBuzz();});"
-                + "hero.addEventListener('touchmove',function(){if(timer){clearTimeout(timer);timer=null;}});"
+                + "hero.addEventListener('touchmove',function(e){if(!timer)return;"
+                + "var t=e.touches&&e.touches[0];"
+                + "if(t&&(Math.abs(t.clientX-sx)+Math.abs(t.clientY-sy))>14){clearTimeout(timer);timer=null;}});"
                 + "hero.addEventListener('contextmenu',function(e){e.preventDefault();});"
+                + "document.addEventListener('visibilitychange',function(){if(document.hidden)stopBuzz();});"
                 + "})();"
                 + "</script>";
     }
