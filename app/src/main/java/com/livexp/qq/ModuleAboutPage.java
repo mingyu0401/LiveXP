@@ -306,7 +306,7 @@ public final class ModuleAboutPage {
                 .append("<div class='ver' id='verLine'>").append(verText).append("</div>")
                 .append("<div class='desc'>").append(descHtml).append("</div>")
                 .append("<div class='cards'>").append(cards(appMode)).append("</div>")
-                .append(credits(sub, cardBorder))
+                .append(credits(sub, cardBorder, appMode))
                 .append("<div class='foot'><a class='log' href='livexp://logs'>查看运行日志</a></div>")
                 .append(script())
                 .append("</body></html>");
@@ -342,8 +342,8 @@ public final class ModuleAboutPage {
                 + "if(v&&ver)v.textContent=ver;}"
                 + "(function(){"
                 + "var hero=document.getElementById('hero');if(!hero)return;"
-                + "var timer=null,fired=false,sx=0,sy=0;"
-                + "function buzz(){fired=true;try{if(window.LiveXPHaptic){LiveXPHaptic.buzz();}else{location.href='livexp://haptic';}}catch(e){}}"
+                + "var timer=null,fired=false,sx=0,sy=0,lastBuzz=0;"
+                + "function buzz(){var n=Date.now();if(n-lastBuzz<1500)return;lastBuzz=n;fired=true;try{if(window.LiveXPHaptic){LiveXPHaptic.buzz();}else{location.href='livexp://haptic';}}catch(e){}}"
                 + "function stopBuzz(){if(fired){fired=false;try{if(window.LiveXPHaptic){LiveXPHaptic.stop();}else{location.href='livexp://hapticstop';}}catch(e){}}}"
                 + "hero.addEventListener('touchstart',function(e){if(timer||fired)return;"
                 + "var t=e.touches&&e.touches[0];if(t){sx=t.clientX;sy=t.clientY;}"
@@ -398,10 +398,11 @@ public final class ModuleAboutPage {
      * 致谢和开源使用说明:首项 QA 模块(提供实现思路),次项 FUNBOX(作者最喜欢的模块,无开源地址),
      * 其余为可能用到的项目,逐个附 GitHub 链接。点按条目复制地址,独立 App 内同时尝试打开。
      */
-    private static String credits(String sub, String cardBorder) {
+    private static String credits(String sub, String cardBorder, boolean appMode) {
         StringBuilder sb = new StringBuilder();
         sb.append("<div class='sec'>")
-                .append("<div class='secH'>致谢和开源使用说明<span class='tag'>可选</span></div>")
+                .append("<div class='secH'>致谢和开源使用说明")
+                .append(appMode ? "" : "<span class='tag'>可选</span>")
                 .append("<div class='secTip'>LiveXP 是站在别人肩膀上的一次尝试。下面这些人和项目让作者少走了很多弯路,")
                 .append("点按条目可复制地址(独立 App 内会同时打开浏览器)。</div>")
                 .append(creditRow("QA 模块", "提供了实现思路,LiveXP 的不少做法参考自它。",
