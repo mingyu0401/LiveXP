@@ -13,3 +13,5 @@ NVIDIA Corporation/
 keystore.properties
 *.jks
 *.keystore
+build.log
+.workbuddy/
