@@ -118,11 +118,14 @@ public final class LivePhotoDetector {
     public static final class BindAnchor {
         public final String path;
         public final String md5;
+        /** 第一条图片的原始大小,用于等原图下载时按 size+md5 反查。 */
+        public final long size;
         public final java.lang.ref.WeakReference<View> image;
 
-        BindAnchor(String path, String md5, View image) {
+        BindAnchor(String path, String md5, long size, View image) {
             this.path = path;
             this.md5 = md5;
+            this.size = size;
             this.image = image == null ? null : new java.lang.ref.WeakReference<>(image);
         }
     }
@@ -154,6 +157,29 @@ public final class LivePhotoDetector {
     public static String boundMd5For(String msgId) {
         BindAnchor a = bindOf(msgId);
         return a == null ? null : a.md5;
+    }
+
+    public static long boundSizeFor(String msgId) {
+        BindAnchor a = bindOf(msgId);
+        return a == null ? -1 : a.size;
+    }
+
+    /**
+     * 多图消息里某一页的路径是否真的属于这张图(同一消息的多页可能共享/串用 layerPicInfo):
+     * 文件存在时按 PicElement 的 fileSize、md5 校验。
+     */
+    public static boolean isPathOfPic(Object msgRecord, int idx, String path) {
+        if (msgRecord == null || idx < 0 || path == null) return true;
+        File f = new File(path);
+        if (!f.isFile()) return true; // 还没下载,交给等待逻辑
+        long size = picFileSizeAt(msgRecord, idx);
+        String md5 = picMd5OfAt(msgRecord, idx);
+        if (size > 0 && f.length() != size) return false;
+        if (md5 != null) {
+            String actual = md5OfFile(path);
+            if (actual != null && !actual.equalsIgnoreCase(md5)) return false;
+        }
+        return true;
     }
 
     private static BindAnchor bindOf(String msgId) {
@@ -196,7 +222,7 @@ public final class LivePhotoDetector {
         if (candidates.size() >= 40) candidates.clear();
         purgeRecycled(liveBinds, img);
         purgeRecycled(candidates, img);
-        liveBinds.put(msgId, new BindAnchor(path, picMd5Of(msgRecord), img));
+        liveBinds.put(msgId, new BindAnchor(path, picMd5Of(msgRecord), picFileSizeAt(msgRecord, 0), img));
     }
 
     public static void noteCandidateBind(Object msgRecord, ViewGroup root, String path) {
@@ -206,7 +232,7 @@ public final class LivePhotoDetector {
         View img = root == null ? null : BadgeInjector.findLargestImageView(root);
         if (candidates.size() >= 40) candidates.clear();
         purgeRecycled(candidates, img);
-        candidates.put(msgId, new BindAnchor(path, picMd5Of(msgRecord), img));
+        candidates.put(msgId, new BindAnchor(path, picMd5Of(msgRecord), picFileSizeAt(msgRecord, 0), img));
     }
 
     /**
@@ -410,6 +436,12 @@ public final class LivePhotoDetector {
     public static String findOriginalByMeta(Object msgRecord, int idx) {
         long size = picFileSizeAt(msgRecord, idx);
         String md5 = picMd5OfAt(msgRecord, idx);
+        if (size < MIN_DETECT_BYTES || md5 == null) return null;
+        return findPathByMeta(size, md5, false);
+    }
+
+    /** 用消息元素以外的元数据(size+md5)反查刚下载的原图。 */
+    public static String findOriginalBySizeMd5(long size, String md5) {
         if (size < MIN_DETECT_BYTES || md5 == null) return null;
         return findPathByMeta(size, md5, false);
     }

@@ -83,6 +83,11 @@ public final class LiveVideoPlayer {
     private static final java.util.Set<Integer> viewScanned = ConcurrentHashMap.newKeySet();
     /** 缩略图/chatimg 页的重扫计划:等 QQ 下载完原图后自动补播(首次「查看原图」不播的修复)。 */
     private static final java.util.Set<Integer> retryPages = ConcurrentHashMap.newKeySet();
+    /** 多图页正在做"路径是否属于这一张"的校验,避免重试叠加。 */
+    private static final java.util.Set<Integer> validatingPages = ConcurrentHashMap.newKeySet();
+    /** 当前查看器内层 RecyclerView 的 adapter,用于监听当前页被重新绑定。 */
+    private static volatile Object galleryAdapter;
+    private static volatile long lastReboundAt;
     private static final java.util.Set<Class<?>> hookedAdapters = ConcurrentHashMap.newKeySet();
     private static volatile boolean scrollSignalInstalled;
     /** 翻页计数:playWhenReady 等待期间翻页则放弃播放。 */
@@ -198,6 +203,9 @@ public final class LiveVideoPlayer {
         pagePath.clear();
         viewScanned.clear();
         retryPages.clear();
+        validatingPages.clear();
+        galleryAdapter = null;
+        lastReboundAt = 0;
         playedPaths.clear();
     }
 
@@ -291,8 +299,17 @@ public final class LiveVideoPlayer {
     /** forceLive=QQ 相册条目已标 isLivePhoto,原图落盘后不用再扫描直接播。 */
     private static void playWhenReady(final String msgId, final String path, final String md5,
                                       final boolean forceLive) {
+        playWhenReady(msgId, path, md5, forceLive, false);
+    }
+
+    /**
+     * ignoreStatic=true:路径来自气泡登记的原图(相册只给了压缩缓存),
+     * 此时旧版本可能把压缩图误判进库2,不能据此直接放弃。
+     */
+    private static void playWhenReady(final String msgId, final String path, final String md5,
+                                      final boolean forceLive, final boolean ignoreStatic) {
         if (path == null) return;
-        if (!forceLive && LivePhotoDetector.isKnownStaticMd5(md5)) return;
+        if (!forceLive && !ignoreStatic && LivePhotoDetector.isKnownStaticMd5(md5)) return;
         final int seq = pageSeq;
         Log.i("candidate wait for original: " + path + (forceLive ? " (qq live)" : ""));
         RETRY_EXEC.execute(() -> {
@@ -420,11 +437,13 @@ public final class LiveVideoPlayer {
             }
         }
         // 相册只给压缩缓存时,同一 msgId 的气泡登记通常已有原图路径(即使还没下载也先占位等落盘)
+        boolean bindOriginal = d.pendingOriginal;
         if (LivePhotoDetector.isCompressedPath(path) && !isMultiPicMessage(msgId)) {
             String bindPath = LivePhotoDetector.boundPathFor(msgId);
             if (bindPath != null) {
                 Log.i("compressed page replaced by bind original: " + bindPath);
                 path = bindPath;
+                bindOriginal = true;
                 if (md5 == null) md5 = LivePhotoDetector.boundMd5For(msgId);
             }
         }
@@ -437,7 +456,50 @@ public final class LiveVideoPlayer {
             schedulePageRetry(pos);
             return;
         }
-        // 多图消息不能按消息级 liveMsgIds 判定:同一气泡里可能只有一张是实况
+        // 多图消息:同一气泡的多页可能共享/串用 layerPicInfo,先校验路径归属,
+        // 否则滑到未下载原图的第二张会直接播第一张的视频。
+        // 路径在相册里被多页共用时同样可疑(典型:第二页拿到第一页的 chatraw)。
+        boolean sharedPath = pathSharedAcrossPages(path, pos);
+        int picCount = LivePhotoDetector.picCount(d.rec);
+        if (sharedPath && (d.rec == null || d.picIndex < 0)) {
+            Log.i("shared path without msg record, wait: " + path + " pos=" + pos);
+            currentSrc = null;
+            removeButton();
+            schedulePageRetry(pos);
+            return;
+        }
+        if ((picCount > 1 || sharedPath) && d.rec != null && d.picIndex >= 0) {
+            final PageData fd = d;
+            final String fp = path, fm = msgId, fmd5 = md5;
+            final int seq = pageSeq;
+            currentSrc = null;
+            removeButton();
+            if (!validatingPages.add(pos)) return;
+            EXEC.execute(() -> {
+                boolean ok = LivePhotoDetector.isPathOfPic(fd.rec, fd.picIndex, fp);
+                MAIN.post(() -> {
+                    validatingPages.remove(pos);
+                    Activity a = galleryRef;
+                    if (a == null || a.isFinishing() || seq != pageSeq || lastSettledPos != pos) return;
+                    if (ok) {
+                        playKnownOrDetect(a, fd, pos, fp, fm, fmd5, false);
+                    } else {
+                        Log.i("multi-pic path mismatch, wait original: path=" + fp
+                                + " idx=" + fd.picIndex + " msgId=" + fm);
+                        currentSrc = null;
+                        removeButton();
+                        schedulePageRetry(pos);
+                    }
+                });
+            });
+            return;
+        }
+        playKnownOrDetect(act, d, pos, path, msgId, md5, bindOriginal);
+    }
+
+    /** 路径归属确认后(或单图页)的判定与播放。 */
+    private static void playKnownOrDetect(Activity act, PageData d, int pos,
+                                          String path, String msgId, String md5, boolean ignoreStatic) {
         boolean multiPic = LivePhotoDetector.picCount(d.rec) > 1;
         boolean known = multiPic
                 ? LivePhotoDetector.isKnownLivePath(path)
@@ -451,18 +513,28 @@ public final class LiveVideoPlayer {
             if (f.isFile() && f.length() >= LivePhotoDetector.MIN_DETECT_BYTES) {
                 playAuto(act, path);
             } else {
-                playWhenReady(msgId, path, md5, true);
+                playWhenReady(msgId, path, md5, true, ignoreStatic);
             }
         } else {
             currentSrc = null;
             removeButton();
-            playWhenReady(msgId, path, md5, false);
+            playWhenReady(msgId, path, md5, false, ignoreStatic);
         }
     }
 
     /** 页码→路径未知时,后台深挖当前居中页 View 的对象图找 MsgRecord 或图片路径。 */
     private static void resolvePageFromView(final int pos) {
         resolvePageFromView(pos, false);
+    }
+
+    /** 同一路径在相册里出现在多个页 = 页码映射/图层信息串用了,不能直接当本页原图。 */
+    private static boolean pathSharedAcrossPages(String path, int pos) {
+        java.util.List<String> paths = albumPaths;
+        if (paths == null || path == null) return false;
+        for (int i = 0; i < paths.size(); i++) {
+            if (i != pos && path.equals(paths.get(i))) return true;
+        }
+        return false;
     }
 
     /** 同一 msgId 在相册里出现多次即为多图消息,气泡登记里的路径只对应第一张。 */
@@ -562,20 +634,33 @@ public final class LiveVideoPlayer {
                         + " idx=" + idx);
                 String prev = pagePath.get(pos);
                 if (prev == null && old != null) prev = old.path;
+                boolean prevPending = prev == null
+                        || LivePhotoDetector.isThumbPath(prev)
+                        || LivePhotoDetector.isCompressedPath(prev);
                 if (path == null || LivePhotoDetector.isThumbPath(path)
                         || LivePhotoDetector.isCompressedPath(path)) {
                     String meta = rec != null
                             ? LivePhotoDetector.findOriginalByMeta(rec, idx)
                             : LivePhotoDetector.findOriginalByPic(fresh == null ? null : fresh.pic);
+                    if (meta == null) {
+                        String mediaId = old == null ? null : old.mediaId;
+                        if (mediaId != null && !isMultiPicMessage(mediaId)) {
+                            meta = LivePhotoDetector.findOriginalBySizeMd5(
+                                    LivePhotoDetector.boundSizeFor(mediaId),
+                                    LivePhotoDetector.boundMd5For(mediaId));
+                        }
+                    }
                     if (meta != null) {
                         if (fresh == null) fresh = new PageData();
                         fresh.path = meta;
                         fresh.rec = rec;
                         fresh.picIndex = idx;
+                        fresh.pendingOriginal = true;
                         Log.i("page refresh: meta original -> " + meta);
                     }
                 }
                 if (fresh != null && fresh.path != null && !fresh.path.equals(prev)) {
+                    if (prevPending) fresh.pendingOriginal = true;
                     final PageData f = fresh;
                     MAIN.post(() -> {
                         if (lastSettledPos != pos || galleryRef == null) return;
@@ -624,6 +709,8 @@ public final class LiveVideoPlayer {
         Boolean live;
         /** RFWLayerItemMediaInfo._mediaId 的下标:一条消息多张图时用来取对应那张。 */
         int picIndex = -1;
+        /** 原图是刚由 size+md5 反查到的(此前该页只有压缩缓存),旧静态库结论不可信。 */
+        boolean pendingOriginal;
     }
 
     /**
@@ -742,6 +829,7 @@ public final class LiveVideoPlayer {
             lastSettledPos = cur;
             Log.i("pager state: currentItem=" + cur + " items=" + itemCount);
             installScrollSignal(rv);
+            installAdapterRebind(adapter);
             final Object adapterF = adapter;
             final Object pagerF = pagerRef;
             final int itemF = itemCount;
@@ -812,6 +900,59 @@ public final class LiveVideoPlayer {
         } catch (Throwable t) {
             Log.i("installScrollSignal error: " + t);
         }
+    }
+
+    /**
+     * 当前页被重新绑定 = QQ 刷新了这一页的内容(「查看原图」下载完成后常走这里)。
+     * 借这个信号重扫一次,解决"首次查看原图后不自动播放"。
+     */
+    private static void installAdapterRebind(Object adapter) {
+        try {
+            if (adapter == null) return;
+            galleryAdapter = adapter;
+            Class<?> target = null;
+            for (Class<?> c = adapter.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                for (java.lang.reflect.Method m : c.getDeclaredMethods()) {
+                    if ("onBindViewHolder".equals(m.getName())) {
+                        target = c;
+                        break;
+                    }
+                }
+                if (target != null) break;
+            }
+            if (target == null) {
+                Log.i("adapter onBindViewHolder not found: " + adapter.getClass().getName());
+                return;
+            }
+            if (!hookedAdapters.add(target)) return;
+            de.robv.android.xposed.XposedBridge.hookAllMethods(target, "onBindViewHolder",
+                    new de.robv.android.xposed.XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(
+                                de.robv.android.xposed.XC_MethodHook.MethodHookParam param) {
+                            if (param.thisObject != galleryAdapter) return;
+                            Object p = param.args != null && param.args.length > 1 ? param.args[1] : null;
+                            if (p instanceof Integer) onPageRebound((Integer) p);
+                        }
+                    });
+            Log.i("adapter rebind hook installed on " + target.getName());
+        } catch (Throwable t) {
+            Log.i("installAdapterRebind error: " + t);
+        }
+    }
+
+    private static void onPageRebound(final int pos) {
+        if (galleryRef == null || pos < 0 || pos != lastSettledPos) return;
+        long now = SystemClock.uptimeMillis();
+        if (now - lastReboundAt < 600) return;
+        lastReboundAt = now;
+        MAIN.postDelayed(() -> {
+            Activity a = galleryRef;
+            if (a == null || a.isFinishing() || lastSettledPos != pos) return;
+            if (overlay != null) return; // 正在播就别打断
+            Log.i("page rebound, refresh: pos=" + pos);
+            refreshPage(pos);
+        }, 400);
     }
 
     private static int currentPosFromChildren() {
