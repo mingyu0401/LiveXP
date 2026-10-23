@@ -1088,9 +1088,14 @@ public final class LiveVideoPlayer {
             if (act == null || act.isFinishing()) return;
             ViewGroup decor = (ViewGroup) act.getWindow().getDecorView();
             final FrameLayout container = new FrameLayout(act);
-            // 不透明黑底:盖住查看器自身按钮,首帧前也不会透出聊天界面
-            container.setBackgroundColor(0xFF000000);
             VideoView video = new VideoView(act);
+            // 透明 surface 放在窗口之上:首帧前完全透明,露出的是查看器原图;
+            // 若留在窗口下方,透明区会透出底下的聊天界面(之前滑动后闪屏的根因)。
+            video.setZOrderOnTop(true);
+            try {
+                video.getHolder().setFormat(android.graphics.PixelFormat.TRANSLUCENT);
+            } catch (Throwable ignored) {
+            }
             FrameLayout.LayoutParams vlp = new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
                     Gravity.CENTER);
