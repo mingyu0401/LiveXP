@@ -2,7 +2,7 @@
 
 QQ(NT 内核) 的 LSPosed 模块:在聊天界面检测**实况图片**(Live Photo / Motion Photo),给对应气泡加「实况」点环角标;点开大图自动播放内嵌动态视频,相册里左右翻页也能跟着播。
 
-> **当前版本 v1.50**(versionCode 51)
+> **当前版本 v1.51**(versionCode 52)
 > 判定规则依赖真机校准,QQ 版本升级后混淆锚点可能漂移,届时需要重新定位。
 
 ## 功能
@@ -23,7 +23,7 @@ QQ(NT 内核) 的 LSPosed 模块:在聊天界面检测**实况图片**(Live Phot
 
 ## 构建
 
-需要 JDK 17 与 Android SDK 36。签名信息放仓库根的 `keystore.properties`(已 gitignore,密钥文件在仓库外),缺失时 release 退化为未签名产物。
+需要 JDK 17+(实测 Android Studio 自带 JBR 21)与 Android SDK 36。签名信息放仓库根的 `keystore.properties`(已 gitignore,密钥文件在仓库外),缺失时 release 退化为未签名产物。
 
 ```bash
 export JAVA_HOME="C:/Program Files/Android/Android Studio/jbr"
