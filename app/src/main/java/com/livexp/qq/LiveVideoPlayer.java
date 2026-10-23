@@ -68,6 +68,8 @@ public final class LiveVideoPlayer {
     private static volatile java.util.List<Object> albumRecs;
     private static volatile java.util.List<Boolean> albumLive;
     private static volatile java.util.List<String> albumIds;
+    /** 相册原始元素表:等原图下载后重读 layerPicInfo,比缓存的字符串快照新。 */
+    private static volatile java.util.List<?> albumRaw;
     private static volatile int lastSettledPos = -1;
     /** 本次打开查看器时 thumb-bound/pending 给出的首屏猜测,相册映射到手即作废。 */
     private static volatile Match initialMatch;
@@ -79,6 +81,8 @@ public final class LiveVideoPlayer {
     private static final Map<Integer, String> pagePath = new ConcurrentHashMap<>();
     /** 已经对某一页做过 View 对象图兜底扫描,避免"缩略图→扫描→还是缩略图"来回打转。 */
     private static final java.util.Set<Integer> viewScanned = ConcurrentHashMap.newKeySet();
+    /** 缩略图/chatimg 页的重扫计划:等 QQ 下载完原图后自动补播(首次「查看原图」不播的修复)。 */
+    private static final java.util.Set<Integer> retryPages = ConcurrentHashMap.newKeySet();
     private static final java.util.Set<Class<?>> hookedAdapters = ConcurrentHashMap.newKeySet();
     private static volatile boolean scrollSignalInstalled;
     /** 翻页计数:playWhenReady 等待期间翻页则放弃播放。 */
@@ -172,6 +176,8 @@ public final class LiveVideoPlayer {
 
     /** GalleryHook 在 QQGalleryActivity onDestroy 后调用。 */
     public static void detach() {
+        // 先停掉播放中的视频,否则只丢引用会让 MediaPlayer 继续出声直到 QQ 进程结束(真机复现)
+        removeOverlay();
         galleryRef = null;
         button = null;
         overlay = null;
@@ -182,6 +188,7 @@ public final class LiveVideoPlayer {
         albumRecs = null;
         albumLive = null;
         albumIds = null;
+        albumRaw = null;
         lastSettledPos = -1;
         pageSeq++;
         initialMatch = null;
@@ -190,7 +197,16 @@ public final class LiveVideoPlayer {
         pageRec.clear();
         pagePath.clear();
         viewScanned.clear();
+        retryPages.clear();
         playedPaths.clear();
+    }
+
+    /** GalleryHook 在 QQGalleryActivity onPause 后调用:切走时立刻停播,避免后台残留声音。 */
+    public static void onGalleryPaused() {
+        if (overlay != null) {
+            Log.i("gallery paused, stop playback");
+            removeOverlay();
+        }
     }
 
     /** thumb-bound 匹配结果。 */
@@ -289,6 +305,11 @@ public final class LiveVideoPlayer {
                         boolean live = forceLive || LivePhotoDetector.isMotionPhotoFile(path);
                         Log.i("candidate scanned: " + f.getName() + " -> " + (live ? "LIVE" : "static"));
                         if (!live) {
+                            // chatimg 只是压缩缓存,不能当成原图结论写进静态库(否则原图下载后也永不播)
+                            if (LivePhotoDetector.isCompressedPath(path)) {
+                                Log.i("compressed cache, keep waiting for original: " + path);
+                                return;
+                            }
                             LivePhotoDetector.confirmStatic(path, md5);
                             return;
                         }
@@ -328,6 +349,7 @@ public final class LiveVideoPlayer {
             if (pos < 0 || pos == lastSettledPos) return;
             lastSettledPos = pos;
             pageSeq++;
+            retryPages.clear();
             // 翻页立即打断正在播放的视频
             removeOverlay();
             PageData d = pageDataAt(pos);
@@ -376,6 +398,10 @@ public final class LiveVideoPlayer {
             currentSrc = null;
             return;
         }
+        if (!LivePhotoDetector.isThumbPath(path) && !LivePhotoDetector.isCompressedPath(path)) {
+            // 已经是原图路径(含 md5 反查到的),不必再等下载
+            retryPages.remove(pos);
+        }
         if (LivePhotoDetector.isThumbPath(path)) {
             // 多图消息的 remembered 路径只对应第一张,拿来兜底会串图
             String orig = LivePhotoDetector.picCount(d.rec) > 1
@@ -388,9 +414,19 @@ public final class LiveVideoPlayer {
                 Log.i("page only has thumbnail, skip play: " + path + " msgId=" + msgId);
                 removeButton();
                 currentSrc = null;
-                if (viewScanned.add(pos)) resolvePageFromView(pos);
+                resolvePageFromView(pos);
+                schedulePageRetry(pos);
                 return;
             }
+        }
+        // chatimg 是压缩缓存,不是原图:QQ 可能正在下载原图,先等路径换成原图再判定
+        if (LivePhotoDetector.isCompressedPath(path)) {
+            Log.i("page has compressed cache, wait for original: " + path + " msgId=" + msgId);
+            currentSrc = null;
+            removeButton();
+            playWhenReady(msgId, path, md5, false);
+            schedulePageRetry(pos);
+            return;
         }
         // 多图消息不能按消息级 liveMsgIds 判定:同一气泡里可能只有一张是实况
         boolean multiPic = LivePhotoDetector.picCount(d.rec) > 1;
@@ -417,6 +453,12 @@ public final class LiveVideoPlayer {
 
     /** 页码→路径未知时,后台深挖当前居中页 View 的对象图找 MsgRecord 或图片路径。 */
     private static void resolvePageFromView(final int pos) {
+        resolvePageFromView(pos, false);
+    }
+
+    /** force=true 供"等原图下载完再补播"的轮询使用,不受 viewScanned 一次限制。 */
+    private static void resolvePageFromView(final int pos, final boolean force) {
+        if (!force && !viewScanned.add(pos)) return;
         final int seq = pageSeq;
         final View page = centerPageView();
         if (page == null) return;
@@ -438,6 +480,86 @@ public final class LiveVideoPlayer {
                 });
             } catch (Throwable t) {
                 Log.i("resolvePageFromView error: " + t);
+            }
+        });
+    }
+
+    /**
+     * 首屏/翻页遇到缩略图或 chatimg 压缩图时,QQ 可能还在下载原图(「查看原图」同理)。
+     * 每秒重扫一次当前页,拿到原图路径后由 applyPage 正常判定并补播;最多 8 次。
+     */
+    private static void schedulePageRetry(final int pos) {
+        if (!retryPages.add(pos)) return;
+        retryStep(pos, 40);
+    }
+
+    private static void retryStep(final int pos, final int left) {
+        if (left <= 0) {
+            retryPages.remove(pos);
+            return;
+        }
+        MAIN.postDelayed(() -> {
+            Activity a = galleryRef;
+            if (a == null || a.isFinishing() || lastSettledPos != pos
+                    || overlay != null || currentSrc != null) {
+                retryPages.remove(pos);
+                return;
+            }
+            Log.i("page retry: pos=" + pos + " left=" + left);
+            refreshPage(pos);
+            retryStep(pos, left - 1);
+        }, 1000);
+    }
+
+    /**
+     * 重读相册原始元素(原图下载后 layerPicInfo 可能已换成 chatraw);
+     * 还是压缩图就按 fileSize+md5 去 chatraw 找刚下载好的原图。
+     */
+    private static void refreshPage(final int pos) {
+        EXEC.execute(() -> {
+            try {
+                if (lastSettledPos != pos || galleryRef == null) return;
+                PageData fresh = null;
+                java.util.List<?> raw = albumRaw;
+                if (raw != null && pos >= 0 && pos < raw.size()) {
+                    fresh = readElementData(raw.get(pos));
+                }
+                PageData old = pageDataAt(pos);
+                if (fresh != null && old != null) {
+                    fresh.picIndex = old.picIndex;
+                    if (fresh.rec == null) fresh.rec = old.rec;
+                }
+                Object rec = fresh != null && fresh.rec != null ? fresh.rec
+                        : (old == null ? null : old.rec);
+                int idx = old != null ? old.picIndex : 0;
+                String path = fresh == null ? null : fresh.path;
+                String prev = pagePath.get(pos);
+                if (prev == null && old != null) prev = old.path;
+                if (path == null || LivePhotoDetector.isThumbPath(path)
+                        || LivePhotoDetector.isCompressedPath(path)) {
+                    String meta = rec != null
+                            ? LivePhotoDetector.findOriginalByMeta(rec, idx)
+                            : LivePhotoDetector.findOriginalByPic(fresh == null ? null : fresh.pic);
+                    if (meta != null) {
+                        if (fresh == null) fresh = new PageData();
+                        fresh.path = meta;
+                        fresh.rec = rec;
+                        fresh.picIndex = idx;
+                        Log.i("page refresh: meta original -> " + meta);
+                    }
+                }
+                if (fresh != null && fresh.path != null && !fresh.path.equals(prev)) {
+                    final PageData f = fresh;
+                    MAIN.post(() -> {
+                        if (lastSettledPos != pos || galleryRef == null) return;
+                        pagePath.put(pos, f.path);
+                        applyPage(galleryRef, f, pos);
+                    });
+                } else {
+                    resolvePageFromView(pos, true);
+                }
+            } catch (Throwable t) {
+                Log.i("refreshPage error: " + t);
             }
         });
     }
@@ -469,6 +591,8 @@ public final class LiveVideoPlayer {
     static final class PageData {
         String path;
         Object rec;
+        /** 元素对象图里的 PicElement(没有 MsgRecord 时用它取 fileSize/md5)。 */
+        Object pic;
         String mediaId;
         Boolean live;
         /** RFWLayerItemMediaInfo._mediaId 的下标:一条消息多张图时用来取对应那张。 */
@@ -719,6 +843,7 @@ public final class LiveVideoPlayer {
                         if (pd != null && pd.size() == itemCount) {
                             Log.i("album elem#0 dump: " + fieldsDump(((java.util.List<?>) v).get(0)));
                             adoptAlbum(pd);
+                            albumRaw = (java.util.List<?>) v;
                             Log.i("album adopted from extra " + k);
                             return;
                         }
@@ -759,6 +884,7 @@ public final class LiveVideoPlayer {
                                     if (pd.size() == itemCount) {
                                         Log.i("album elem#0 dump: " + fieldsDump(l.get(0)));
                                         adoptAlbum(pd);
+                                        albumRaw = l;
                                         Log.i("album adopted: aligned with " + itemCount + " pages");
                                         logMultiImage(l, pd);
                                         return;
@@ -919,6 +1045,7 @@ public final class LiveVideoPlayer {
         int bestScore = own == null ? 0 : 100;
         while (!queue.isEmpty() && scanned++ < 80) {
             Object o = queue.poll();
+            if (best.pic == null && "PicElement".equals(o.getClass().getSimpleName())) best.pic = o;
             if (best.rec == null && looksLikeMsgRecord(o)) {
                 best.rec = o;
                 String p = LivePhotoDetector.elementPathOfAt(o, best.picIndex);
@@ -1144,6 +1271,7 @@ public final class LiveVideoPlayer {
                 vv.stopPlayback();
             } catch (Throwable ignored) {
             }
+            Log.i("overlay removed, player stopped");
         }
         if (o != null && o.getParent() instanceof ViewGroup) {
             ((ViewGroup) o.getParent()).removeView(o);

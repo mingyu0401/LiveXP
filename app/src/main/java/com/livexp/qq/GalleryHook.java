@@ -31,6 +31,15 @@ public final class GalleryHook {
                     }
                 }
             });
+            XposedBridge.hookAllMethods(Instrumentation.class, "callActivityOnPause", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    Activity act = activityOf(param);
+                    if (act != null && GALLERY.equals(act.getClass().getName())) {
+                        LiveVideoPlayer.onGalleryPaused();
+                    }
+                }
+            });
             XposedBridge.hookAllMethods(Instrumentation.class, "callActivityOnDestroy", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {

@@ -143,6 +143,11 @@ public final class LivePhotoDetector {
         return p != null && (p.contains("/chatthumb/") || p.endsWith("_hd"));
     }
 
+    /** 压缩缓存(chatimg/chatthumb):内容不是原图,不能据此判定为静态并写库。 */
+    public static boolean isCompressedPath(String p) {
+        return p != null && (p.contains("/chatimg/") || p.contains("/chatthumb/"));
+    }
+
     private static void rememberOriginal(String msgId, String path) {
         if (msgId == null || path == null || isThumbPath(path)) return;
         if (originalByMsg.size() >= 300) originalByMsg.clear();
@@ -212,7 +217,8 @@ public final class LivePhotoDetector {
 
     public static boolean isKnownStaticMd5(String md5) {
         ensureMd5Loaded();
-        return md5 != null && md5Static.contains(md5);
+        // 曾经被压缩缓存误判进库2的 md5,后续确认实况后以库1为准
+        return md5 != null && md5Static.contains(md5) && !md5Live.contains(md5);
     }
 
     /** 从 MsgRecord 的 FileElement.filePath / PicElement.sourcePath 取本地路径,取不到返回 null。 */
@@ -306,12 +312,15 @@ public final class LivePhotoDetector {
                 boolean exists = f.isFile();
                 long size = f.length();
                 boolean live = exists && size >= MIN_DETECT_BYTES && isMotionPhotoFile(path);
-                // 文件还没下载到本地时不要缓存结论,等原图落盘后 bind 再触发可重新判定
-                if (exists) pathVerdict.put(path, live);
+                // 文件还没下载到本地时不要缓存结论,等原图落盘后 bind 再触发可重新判定;
+                // chatimg/chatthumb 是压缩缓存,扫出 static 也不能写库(原图下载后还要重新判)
+                boolean cacheable = exists && (live || !isCompressedPath(path));
+                if (cacheable) pathVerdict.put(path, live);
                 Log.i("live check: " + f.getName() + " exists=" + exists
                         + " size=" + (size / 1024) + "KB -> " + (live ? "LIVE" : "static")
-                        + (exists ? " magic=" + magicHex(f) : ""));
-                if (exists && size >= MIN_DETECT_BYTES) recordMd5(md5, live);
+                        + (exists ? " magic=" + magicHex(f) : "")
+                        + (isCompressedPath(path) ? " compressed=1" : ""));
+                if (cacheable && size >= MIN_DETECT_BYTES) recordMd5(md5, live);
                 if (live) {
                     liveHitCount++;
                     Log.i("live photo detected: " + path + (picIndex >= 0 ? " idx=" + picIndex : ""));
@@ -336,6 +345,7 @@ public final class LivePhotoDetector {
             "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic/chatraw";
     private static final java.util.Map<Long, java.util.List<String>> sizeIndex = new java.util.HashMap<>();
     private static boolean sizeIndexBuilt;
+    private static volatile long sizeIndexBuiltAt;
     private static final Map<String, String> metaPathHit = new ConcurrentHashMap<>();
     private static final Set<String> metaPathMiss = ConcurrentHashMap.newKeySet();
     private static final Set<String> metaPending = ConcurrentHashMap.newKeySet();
@@ -367,11 +377,53 @@ public final class LivePhotoDetector {
     }
 
     private static String findPathByMeta(long size, String md5) {
+        return findPathByMeta(size, md5, true);
+    }
+
+    /**
+     * 查看器等原图时用:按 fileSize+md5 找 chatraw 原图。
+     * 不走 miss 缓存,因为文件可能刚下载完成;每次都要重新看一遍候选。
+     */
+    public static String findOriginalByMeta(Object msgRecord, int idx) {
+        long size = picFileSizeAt(msgRecord, idx);
+        String md5 = picMd5OfAt(msgRecord, idx);
+        if (size < MIN_DETECT_BYTES || md5 == null) return null;
+        return findPathByMeta(size, md5, false);
+    }
+
+    /** 查看器元素里直接挂着 PicElement、没有 MsgRecord 时,用 PicElement 的 fileSize+md5 反查。 */
+    public static String findOriginalByPic(Object pic) {
+        if (pic == null) return null;
+        long size = -1;
+        String md5 = null;
+        try {
+            Object v = XposedHelpers.getObjectField(pic, "fileSize");
+            if (v instanceof Number) size = ((Number) v).longValue();
+        } catch (Throwable ignored) {
+        }
+        try {
+            Object v = XposedHelpers.getObjectField(pic, "md5HexStr");
+            if (v instanceof String) md5 = ((String) v).trim().toLowerCase(Locale.US);
+        } catch (Throwable ignored) {
+        }
+        if (size < MIN_DETECT_BYTES || md5 == null || md5.isEmpty()) return null;
+        return findPathByMeta(size, md5, false);
+    }
+
+    private static String findPathByMeta(long size, String md5, boolean useMissCache) {
         String key = size + ":" + md5;
         String hit = metaPathHit.get(key);
         if (hit != null) return hit;
-        if (metaPathMiss.contains(key)) return null;
+        if (useMissCache && metaPathMiss.contains(key)) return null;
         buildSizeIndex();
+        // 索引是快照:查看器里原图可能是建索引之后才下载的,先看最近变动过的 hash 目录
+        if (!useMissCache) {
+            String recent = findInRecentDirs(size, md5, sizeIndexBuiltAt);
+            if (recent != null) {
+                metaPathHit.put(key, recent);
+                return recent;
+            }
+        }
         java.util.List<String> cands;
         synchronized (sizeIndex) {
             java.util.List<String> l = sizeIndex.get(size);
@@ -385,7 +437,25 @@ public final class LivePhotoDetector {
                 }
             }
         }
-        metaPathMiss.add(key);
+        if (useMissCache) metaPathMiss.add(key);
+        return null;
+    }
+
+    /** 只扫建索引之后有变动的 chatraw 子目录,用于发现刚下载完成的新原图。 */
+    private static String findInRecentDirs(long size, String md5, long since) {
+        File root = new File(CHATRAW_DIR);
+        File[] dirs = root.listFiles();
+        if (dirs == null) return null;
+        for (File dir : dirs) {
+            if (!dir.isDirectory() || dir.lastModified() < since - 2000) continue;
+            File[] files = dir.listFiles();
+            if (files == null) continue;
+            for (File f : files) {
+                if (f.isFile() && f.length() == size && md5.equals(md5OfFile(f.getAbsolutePath()))) {
+                    return f.getAbsolutePath();
+                }
+            }
+        }
         return null;
     }
 
@@ -394,6 +464,7 @@ public final class LivePhotoDetector {
         synchronized (sizeIndex) {
             if (sizeIndexBuilt) return;
             sizeIndexBuilt = true;
+            sizeIndexBuiltAt = System.currentTimeMillis();
             collectSizes(new File(CHATRAW_DIR), 0);
             Log.i("chatraw size index: " + sizeIndex.size() + " sizes");
         }
