@@ -51,6 +51,12 @@ LSPosed 里启用模块并勾选 QQ 作用域,重启 QQ:
 
 > **发送提示**:必须发送/接收**实况照片原图**。不要压缩图片,也不要通过系统「分享」把图片发到 QQ——一加相册分享到 QQ 会破坏实况数据,模块将识别不到。
 
+## 反馈问题
+
+提交 issue 时请尽量附上模块日志文件,方便定位问题,路径是:
+
+`/storage/emulated/0/Android/data/com.tencent.mobileqq/LiveXP/livexp.log`
+
 ## 致谢与开源说明
 
 - **Qoder 与 deepseek-v4.1-flash / glm-5.3-flash / qwen-3.8-flash** 还有我的小手机(一加 15) :)
