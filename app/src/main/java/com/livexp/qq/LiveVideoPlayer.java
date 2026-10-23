@@ -68,6 +68,8 @@ public final class LiveVideoPlayer {
     private static volatile java.util.List<Object> albumRecs;
     private static volatile java.util.List<Boolean> albumLive;
     private static volatile java.util.List<String> albumIds;
+    /** 每页在所属消息里的图片序号(adoptAlbum 按出现次序修正),pageDataAt 必须带上。 */
+    private static volatile java.util.List<Integer> albumPicIdx;
     /** 相册原始元素表:等原图下载后重读 layerPicInfo,比缓存的字符串快照新。 */
     private static volatile java.util.List<?> albumRaw;
     private static volatile int lastSettledPos = -1;
@@ -194,6 +196,7 @@ public final class LiveVideoPlayer {
         albumLive = null;
         albumIds = null;
         albumRaw = null;
+        albumPicIdx = null;
         lastSettledPos = -1;
         pageSeq++;
         initialMatch = null;
@@ -400,6 +403,10 @@ public final class LiveVideoPlayer {
             if (d.rec == null && recs != null && pos < recs.size()) d.rec = recs.get(pos);
             if (live != null && pos < live.size()) d.live = live.get(pos);
             if (ids != null && pos < ids.size()) d.mediaId = ids.get(pos);
+            java.util.List<Integer> idxs = albumPicIdx;
+            if (idxs != null && pos < idxs.size() && idxs.get(pos) != null) {
+                d.picIndex = idxs.get(pos);
+            }
         }
         return (d.path == null && d.rec == null) ? null : d;
     }
@@ -459,12 +466,14 @@ public final class LiveVideoPlayer {
         // 多图消息:同一气泡的多页可能共享/串用 layerPicInfo,先校验路径归属,
         // 否则滑到未下载原图的第二张会直接播第一张的视频。
         // 路径在相册里被多页共用时同样可疑(典型:第二页拿到第一页的 chatraw)。
-        boolean sharedPath = pathSharedAcrossPages(path, pos);
+        boolean sharedPath = sharedPageOf(path, pos) >= 0;
         int picCount = LivePhotoDetector.picCount(d.rec);
         if (sharedPath && (d.rec == null || d.picIndex < 0)) {
-            Log.i("shared path without msg record, wait: " + path + " pos=" + pos);
+            Log.i("shared path without msg record, wait: " + path + " pos=" + pos
+                    + " also=" + sharedPageOf(path, pos));
             currentSrc = null;
             removeButton();
+            refreshPage(pos);   // 立即读一次相册原始元素拿 MsgRecord,不用干等 1 秒轮询
             schedulePageRetry(pos);
             return;
         }
@@ -527,14 +536,14 @@ public final class LiveVideoPlayer {
         resolvePageFromView(pos, false);
     }
 
-    /** 同一路径在相册里出现在多个页 = 页码映射/图层信息串用了,不能直接当本页原图。 */
-    private static boolean pathSharedAcrossPages(String path, int pos) {
+    /** 同一路径在相册里出现在多个页 = 页码映射/图层信息串用了,返回另一个页码,没有则 -1。 */
+    private static int sharedPageOf(String path, int pos) {
         java.util.List<String> paths = albumPaths;
-        if (paths == null || path == null) return false;
+        if (paths == null || path == null) return -1;
         for (int i = 0; i < paths.size(); i++) {
-            if (i != pos && path.equals(paths.get(i))) return true;
+            if (i != pos && path.equals(paths.get(i))) return i;
         }
-        return false;
+        return -1;
     }
 
     /** 同一 msgId 在相册里出现多次即为多图消息,气泡登记里的路径只对应第一张。 */
@@ -622,7 +631,7 @@ public final class LiveVideoPlayer {
                 }
                 PageData old = pageDataAt(pos);
                 if (fresh != null && old != null) {
-                    fresh.picIndex = old.picIndex;
+                    if (old.picIndex >= 0) fresh.picIndex = old.picIndex;
                     if (fresh.rec == null) fresh.rec = old.rec;
                 }
                 Object rec = fresh != null && fresh.rec != null ? fresh.rec
@@ -638,7 +647,8 @@ public final class LiveVideoPlayer {
                         || LivePhotoDetector.isThumbPath(prev)
                         || LivePhotoDetector.isCompressedPath(prev);
                 if (path == null || LivePhotoDetector.isThumbPath(path)
-                        || LivePhotoDetector.isCompressedPath(path)) {
+                        || LivePhotoDetector.isCompressedPath(path)
+                        || (rec != null && idx >= 0 && sharedPageOf(path, pos) >= 0)) {
                     String meta = rec != null
                             ? LivePhotoDetector.findOriginalByMeta(rec, idx)
                             : LivePhotoDetector.findOriginalByPic(fresh == null ? null : fresh.pic);
@@ -659,8 +669,13 @@ public final class LiveVideoPlayer {
                         Log.i("page refresh: meta original -> " + meta);
                     }
                 }
-                if (fresh != null && fresh.path != null && !fresh.path.equals(prev)) {
+                boolean gainedRec = fresh != null && fresh.rec != null && (old == null || old.rec == null);
+                if (fresh != null && fresh.path != null && (!fresh.path.equals(prev) || gainedRec)) {
                     if (prevPending) fresh.pendingOriginal = true;
+                    if (fresh.rec != null) {
+                        java.util.List<Object> recs = albumRecs;
+                        if (recs != null && pos >= 0 && pos < recs.size()) recs.set(pos, fresh.rec);
+                    }
                     final PageData f = fresh;
                     MAIN.post(() -> {
                         if (lastSettledPos != pos || galleryRef == null) return;
@@ -1270,16 +1285,19 @@ public final class LiveVideoPlayer {
         java.util.List<Object> recs = new java.util.ArrayList<>(pd.size());
         java.util.List<Boolean> live = new java.util.ArrayList<>(pd.size());
         java.util.List<String> ids = new java.util.ArrayList<>(pd.size());
+        java.util.List<Integer> idxs = new java.util.ArrayList<>(pd.size());
         // _mediaId 后缀是元素下标(纯图片消息从 0 起、带文字消息从 1 起),不能直接当图序;
         // 同一消息的多页在相册里按图片顺序排列,按出现次序编号才可靠。
         java.util.Map<String, Integer> occurrences = new java.util.HashMap<>();
         for (PageData d : pd) {
+            int idx = -1;
             if (d != null && d.mediaId != null) {
                 Integer n = occurrences.get(d.mediaId);
-                int idx = n == null ? 0 : n;
+                idx = n == null ? 0 : n;
                 d.picIndex = idx;
                 occurrences.put(d.mediaId, idx + 1);
             }
+            idxs.add(idx);
             paths.add(d == null ? null : d.path);
             recs.add(d == null ? null : d.rec);
             live.add(d == null ? null : d.live);
@@ -1289,6 +1307,7 @@ public final class LiveVideoPlayer {
         albumIds = ids;
         albumRecs = recs;
         albumPaths = paths;
+        albumPicIdx = idxs;
         applyCurrentPageIfUnknown();
     }
 
