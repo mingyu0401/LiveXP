@@ -23,8 +23,8 @@ import java.util.ArrayDeque;
 
 /**
  * LiveXP 独立 App:与 QQ 设置页同款关于界面;「查看运行日志」切入日志视图。
- * 关键差异:这里要判断模块是否真的被 LSPosed 启用 —— 向 QQ 进程发探活广播,
- * 模块收到后回一条状态(同时带上实际 LSPosed/QQ 版本),超时没回就算未激活。
+ * 关键差异:这里要判断模块是否真的被 LSPosed 启用 —— 向 QQ 进程探活,
+ * 模块收到后经 StatusProvider(失败退回广播)回报状态与实测 QQ 版本,超时没回就算未激活。
  */
 public class StatusActivity extends Activity {
 
@@ -156,14 +156,10 @@ public class StatusActivity extends Activity {
         }
     }
 
-    /** 激活时的副标题:LSPosed 实际版本 + API(版本由 QQ 进程里的模块上报)。 */
+    /** 激活时的副标题:框架名 + API 级别(LSPosed 版本号暂不探测,管理器 versionName 并不可靠)。 */
     private static String activeVer(SharedPreferences sp) {
-        String v = sp.getString("lsposed", null);
         int api = sp.getInt("api", -1);
-        StringBuilder sb = new StringBuilder("LSPosed");
-        if (v != null && !v.isEmpty()) sb.append(' ').append(v);
-        if (api > 0) sb.append(", API ").append(api);
-        return sb.toString();
+        return api > 0 ? "LSPosed API " + api : "LSPosed";
     }
 
     /** 未激活时的副标题:本机实际 QQ 版本,读不到就退回上次上报值。 */

@@ -2,7 +2,9 @@
 
 QQ(NT 内核) 的 LSPosed 模块:在聊天界面检测**实况图片**(Live Photo / Motion Photo),给对应气泡加「实况」点环角标;点开大图自动播放内嵌动态视频。
 
-> **当前版本 v1.52**(versionCode 53)
+[![Star](https://img.shields.io/github/stars/mingyu0401/LiveXP?style=for-the-badge&logo=github&label=%E2%AD%90%20Star&color=ff69b4)](https://github.com/mingyu0401/LiveXP)
+
+> **当前版本 v1.54**(versionCode 55)
 > 判定规则依赖真机校准,QQ 版本升级后混淆锚点可能漂移,届时需要重新定位。
 
 ## 功能
@@ -11,12 +13,13 @@ QQ(NT 内核) 的 LSPosed 模块:在聊天界面检测**实况图片**(Live Phot
 - **大图播放**:点开已确认的实况图自动播放一次内嵌视频,播完回到照片;查看器右上角留实况图标作重播按钮,播放中覆盖层盖住查看器其他按钮
 - **翻页续播**:相册内左右滑动切到下一张实况图自动播放,拖动即停播
 - **模块设置入口**:QQ 设置页「LiveXP 模块」项 → 进程内关于页(介绍、复制链接、赞赏、运行日志、致谢与开源说明)
-- **独立 App**:桌面图标,同一套关于页 + 日志视图,深色模式跟随系统
+- **独立 App**:桌面图标,同一套关于页 + 日志视图,深色模式跟随系统;并检测模块是否真的被 LSPosed 启用,主标题在「LiveXP 已激活 / 未激活」间切换,未激活时停掉全部炫彩效果
+- **关于页细节**:版本行显示**实际** QQ 版本(运行时读取,不写死);长按顶部图案有 3 秒渐快震动彩蛋;交流群一键跳转
 
 ## 已验证的环境
 
-- QQ 9.3.70(NT 内核,tinker 热更)+ LSPosed
-- Android 16 / arm64(一加 15 PLK110 真机)
+- KSU + LSPosed 2.2.1(7925)+ Android 17(一加 15 PLK110 真机,arm64)
+- QQ 9.2.66 / 9.3.70 测试通过(NT 内核,tinker 热更)
 
 ## 构建
 
@@ -32,6 +35,7 @@ LSPosed 里启用模块并勾选 QQ 作用域,重启 QQ:
 
 ## 致谢与开源说明
 
+- **Qoder 与 deepseek-v4.1-flash / glm-5.3-flash / qwen-3.8-flash** —— 一起写代码、查资料、反复试错的搭档;还有作者自己和那台小手机(一加 15),所有结论都是在这台机器上跑出来的 :)
 - **FUNBOX** —— 本人最喜欢的模块,给了我很大的动力。
 - **[QA 模块](https://github.com/cinit/QAuxiliary)** —— 提供了实现思路。
 - [LSPosed](https://github.com/LSPosed/LSPosed)、[XposedBridge](https://github.com/rovo89/XposedBridge)、[AndroidX](https://github.com/androidx/androidx) 等等。

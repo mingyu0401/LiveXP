@@ -26,7 +26,13 @@
             </intent-filter>
         </activity>
 
-        <!-- 接收 QQ 进程里模块发来的激活心跳 -->
+        <!-- 状态回传主通道:模块在 QQ 进程里 call() 进来写心跳 -->
+        <provider
+            android:name=".StatusProvider"
+            android:authorities="com.livexp.qq.status"
+            android:exported="true" />
+
+        <!-- 广播兜底(部分 ROM 会 defer 跨进程广播) -->
         <receiver
             android:name=".StatusReceiver"
             android:exported="true">

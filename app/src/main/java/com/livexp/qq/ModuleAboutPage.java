@@ -54,6 +54,10 @@ public final class ModuleAboutPage {
                     Haptics.play(ctx);
                     return true;
                 }
+                if (url.startsWith("livexp://join")) {
+                    joinGroup(ctx);
+                    return true;
+                }
                 if (url.startsWith("livexp://copy")) {
                     Uri u = Uri.parse(url);
                     String text = u.getQueryParameter("t");
@@ -97,6 +101,37 @@ public final class ModuleAboutPage {
             }
         });
         return web;
+    }
+
+    /** 交流群 923820659:优先 QQ 的群资料卡 scheme,失败再退回群会话 scheme,最后复制群号。 */
+    private static void joinGroup(Context ctx) {
+        final String uin = "923820659";
+        final String[] schemes = {
+                "mqqapi://card/show_pslcard?src_type=internal&version=1&uin=" + uin
+                        + "&card_type=group&source=qrcode",
+                "mqq://im/chat?chat_type=group&uin=" + uin + "&version=1&src_type=web"
+        };
+        for (String s : schemes) {
+            try {
+                Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(s));
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                i.setPackage("com.tencent.mobileqq");
+                ctx.startActivity(i);
+                Log.i("join group: " + s);
+                return;
+            } catch (Throwable t) {
+                Log.i("join group failed " + s + " -> " + t);
+            }
+        }
+        try {
+            android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm != null) {
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("LiveXP", uin));
+            }
+            Toast.makeText(ctx, "未能直接打开 QQ,群号 " + uin + " 已复制", Toast.LENGTH_LONG).show();
+        } catch (Throwable ignored) {
+        }
     }
 
     /** 模块设置页(QQ 进程内):始终炫彩;ver 行带实际 QQ 版本与 LSPosed 版本。 */
@@ -206,6 +241,7 @@ public final class ModuleAboutPage {
                 .append(".ico{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;")
                 .append("justify-content:center;font-size:19px;flex:none}")
                 .append(".c1{background:linear-gradient(135deg,#6e40c9,#388bfd)}")
+                .append(".c2{background:linear-gradient(135deg,#1f883d,#38bdf8)}")
                 .append(".c3{background:linear-gradient(135deg,#d29922,#f0883e)}")
                 .append(".c4{background:linear-gradient(135deg,#f0883e,#f85149)}")
                 .append(".tt{font-size:15px;font-weight:bold;display:flex;align-items:baseline;flex-wrap:wrap}")
@@ -268,6 +304,8 @@ public final class ModuleAboutPage {
                     copyHref(mail) + "&mailto=" + mail));
             sb.append(card("c4", "&#9749;", "支持作者", null, "请作者喝杯咖啡", "livexp://support"));
         }
+        // 交流群:模块页排在「支持作者」下,独立 App 排在「项目源码」下
+        sb.append(card("c2", "&#128172;", "加入交流群", null, "923820659", "livexp://join"));
         return sb.toString();
     }
 

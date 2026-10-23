@@ -20,6 +20,8 @@ final class StatusBridge {
     static final String ACTION_PING = "com.livexp.qq.PING";
     private static final String APP_PKG = "com.livexp.qq";
     private static final String APP_RECEIVER = APP_PKG + ".StatusReceiver";
+    /** 独立 App 的 StatusProvider(写心跳主通道)。 */
+    private static final String STATUS_URI = "content://com.livexp.qq.status";
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     private static volatile boolean installed;
@@ -67,7 +69,9 @@ final class StatusBridge {
             BroadcastReceiver ping = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
-                    report(context == null ? ctx : context, "ping");
+                    final Context c = context == null ? ctx : context;
+                    // provider 调用是同步 binder,放到后台线程,别堵 QQ 主线程
+                    new Thread(() -> report(c, "ping"), "LiveXP-status").start();
                 }
             };
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -82,18 +86,39 @@ final class StatusBridge {
         report(ctx, "boot");
     }
 
-    /** 推一次状态给独立 App(显式广播,目标不存在时静默失败)。 */
+    /**
+     * 推一次状态给独立 App:优先 ContentResolver.call(同步 binder,不会被 ROM 的广播 defer 策略拖住),
+     * 失败再退回显式广播。
+     */
     static void report(Context ctx, String why) {
         try {
             LspInfo.ensure(ctx);
-            Intent i = new Intent(ACTION_STATUS);
-            i.setClassName(APP_PKG, APP_RECEIVER);
-            i.putExtra("ts", System.currentTimeMillis());
-            i.putExtra("lsposed", LspInfo.lsposedVersion);
-            i.putExtra("api", LspInfo.apiVersion);
-            i.putExtra("qq", LspInfo.qqVersion);
-            ctx.sendBroadcast(i);
-            Log.i("status bridge: report(" + why + ") lsposed=" + LspInfo.lsposedVersion
+            android.os.Bundle b = new android.os.Bundle();
+            b.putLong("ts", System.currentTimeMillis());
+            b.putString("lsposed", LspInfo.lsposedVersion);
+            b.putInt("api", LspInfo.apiVersion);
+            b.putString("qq", LspInfo.qqVersion);
+            try {
+                ctx.getPackageManager().getPackageInfo(APP_PKG, 0);
+                Log.i("status bridge: target app visible");
+            } catch (Throwable t) {
+                Log.i("status bridge: target app NOT visible: " + t);
+            }
+            boolean ok = false;
+            try {
+                android.os.Bundle r = ctx.getContentResolver().call(
+                        android.net.Uri.parse(STATUS_URI), "report", null, b);
+                ok = r != null && r.getBoolean("ok", false);
+            } catch (Throwable t) {
+                Log.i("status bridge: provider call failed " + t);
+            }
+            if (!ok) {
+                Intent i = new Intent(ACTION_STATUS);
+                i.setClassName(APP_PKG, APP_RECEIVER);
+                i.putExtras(b);
+                ctx.sendBroadcast(i);
+            }
+            Log.i("status bridge: report(" + why + ") viaProvider=" + ok + " lsposed=" + LspInfo.lsposedVersion
                     + " api=" + LspInfo.apiVersion + " qq=" + LspInfo.qqVersion);
         } catch (Throwable t) {
             Log.i("status bridge: report failed " + t);
