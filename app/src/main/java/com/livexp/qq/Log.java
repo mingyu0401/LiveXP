@@ -33,7 +33,12 @@ public final class Log {
     }
 
     public static synchronized void i(String msg) {
-        XposedBridge.log("[" + HookEntry.TAG + "] " + msg);
+        try {
+            XposedBridge.log("[" + HookEntry.TAG + "] " + msg);
+        } catch (Throwable t) {
+            // 独立 App 进程里没有 XposedBridge,退回 logcat,方便 adb 验证
+            android.util.Log.i("LiveXP", msg);
+        }
         String line = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(new Date()) + " " + msg + "\n";
         for (FileWriter w : writers) {
             try {

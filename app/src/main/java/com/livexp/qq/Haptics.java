@@ -22,6 +22,10 @@ public final class Haptics {
             Vibrator v = (Vibrator) ctx.getSystemService(Context.VIBRATOR_SERVICE);
             if (v == null || !v.hasVibrator()) return;
             long[] wave = ramp(TOTAL_MS);
+            try {
+                v.cancel(); // 叠加重放会拖长震动,新的一次先收掉旧的
+            } catch (Throwable ignored) {
+            }
             current = v;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 v.vibrate(VibrationEffect.createWaveform(wave, -1));
