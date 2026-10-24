@@ -1,6 +1,6 @@
 # LiveXP
 
-<img src="assets/livexp-about.gif" width="320" alt="LiveXP 关于页">
+<p align="center"><img src="assets/livexp-about.gif" width="320" alt="LiveXP 关于页"></p>
 
 LiveXP是一个实现 QQ 实况功能的开源 Xposed 模块.
 在聊天界面检测**实况图片**(Live Photo / Motion Photo),给对应气泡加「实况」角标;点开大图自动播放内嵌动态视频。
@@ -33,6 +33,10 @@ LiveXP是一个实现 QQ 实况功能的开源 Xposed 模块.
 ## 实况图检测说明
 
 > 实况图仅检测 1MB 以上文件,是实现原理导致。目前仅测试了 OPPO 实况图,其他待测。OPPO 实况示例图在 [samples/oppo/](samples/oppo/),可以用电脑 QQ 发送到 QQ 聊天,在手机上体验实况照片。
+
+## 兼容性
+
+以下为最新兼容性结论(以此为准):小米实况照片测试通过,不出意外荣耀 魅族 三星 vivo单文件 谷歌原生 的实况查看 全部适配,苹果(转码) 华为(不知道) vivo双文件(没发mp4)因其QQ发送底层不可能完成实况查看,只能等待遥遥无期的QQ更新.
 
 ## 已验证的环境
 
