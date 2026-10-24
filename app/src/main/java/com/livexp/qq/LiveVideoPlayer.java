@@ -107,6 +107,11 @@ public final class LiveVideoPlayer {
     /** GalleryHook 在 QQGalleryActivity onResume 后调用。 */
     public static void onGalleryResumed(Activity activity) {
         try {
+            // 上一个查看器还停在 pause(未 destroy)时又开了新的:旧映射不能带进新会话
+            if (galleryRef != null && galleryRef != activity) {
+                Log.i("gallery switched without destroy, reset stale session");
+                resetSessionState();
+            }
             galleryRef = activity;
             initialSeq++;
             initialResolved = false;
@@ -182,10 +187,24 @@ public final class LiveVideoPlayer {
     }
 
     /** GalleryHook 在 QQGalleryActivity onDestroy 后调用。 */
-    public static void detach() {
+    public static void detach(Activity activity) {
+        // 查看器可能叠开:旧 Activity 的 destroy 不能清掉当前会话的状态
+        if (activity != null && galleryRef != null && activity != galleryRef) {
+            Log.i("ignore detach of non-current gallery");
+            return;
+        }
+        resetSessionState();
+        galleryRef = null;
+        pendingPath = null;
+        pendingAt = 0;
+        initialSeq++;
+    }
+
+    /** 清掉一次查看器会话的全部映射,保留跨会话的实况判定库与已安装的 hook。 */
+    private static void resetSessionState() {
         // 先停掉播放中的视频,否则只丢引用会让 MediaPlayer 继续出声直到 QQ 进程结束(真机复现)
         removeOverlay();
-        galleryRef = null;
+        currentSrc = null;
         button = null;
         overlay = null;
         overlayVideo = null;
@@ -201,7 +220,6 @@ public final class LiveVideoPlayer {
         pageSeq++;
         initialMatch = null;
         initialResolved = false;
-        initialSeq++;
         pageRec.clear();
         pagePath.clear();
         viewScanned.clear();
@@ -213,7 +231,8 @@ public final class LiveVideoPlayer {
     }
 
     /** GalleryHook 在 QQGalleryActivity onPause 后调用:切走时立刻停播,避免后台残留声音。 */
-    public static void onGalleryPaused() {
+    public static void onGalleryPaused(Activity activity) {
+        if (activity != null && galleryRef != null && activity != galleryRef) return;
         if (overlay != null) {
             Log.i("gallery paused, stop playback");
             removeOverlay();
@@ -247,6 +266,10 @@ public final class LiveVideoPlayer {
                 Match m = matchBoundIn(LivePhotoDetector.liveBinds, bound, true);
                 if (m == null) m = matchBoundIn(LivePhotoDetector.candidates, bound, false);
                 if (m != null) return m;
+                // 有点击矩形却没命中任何气泡,说明点的是别的消息(典型:回复气泡里引用的图片)。
+                // 此时绝不能退回"唯一一条实况登记",否则会把旧实况的视频叠到这张图上。
+                Log.i("thumb-bound miss, wait for album mapping");
+                return null;
             }
             Match only = onlyOne(LivePhotoDetector.liveBinds, true);
             if (only == null) only = onlyOne(LivePhotoDetector.candidates, false);
@@ -1034,6 +1057,20 @@ public final class LiveVideoPlayer {
                     if (visited.add(v)) queue.add(v);
                 }
             }
+            // 单图查看器(回复气泡里引用的图片)相册表只有 1 条,走后面的 3000 对象 BFS 会先耗尽;
+            // 直接进 key_init_bean 找与页数一致、元素确实是媒体信息的列表
+            java.util.List<?> beanAlbum = findAlbumInBean(act, itemCount);
+            if (beanAlbum != null) {
+                java.util.List<PageData> pd = pageDataOf(beanAlbum);
+                if (pd != null && pd.size() == itemCount) {
+                    Log.i("album elem#0 dump: " + fieldsDump(beanAlbum.get(0)));
+                    adoptAlbum(pd);
+                    albumRaw = beanAlbum;
+                    Log.i("album adopted from key_init_bean: " + itemCount + " pages");
+                    logMultiImage(beanAlbum, pd);
+                    return;
+                }
+            }
             if (adapter != null && visited.add(adapter)) queue.add(adapter);
             if (pager != null && visited.add(pager)) queue.add(pager);
             int scanned = 0;
@@ -1059,7 +1096,8 @@ public final class LiveVideoPlayer {
                         if (v instanceof java.util.List) {
                             java.util.List<?> l = (java.util.List<?>) v;
                             // 只对页数附近的表做逐元素解析,避免全图反射扫描拖慢后台线程
-                            if (Math.abs(l.size() - itemCount) <= 2 && l.size() >= 2) {
+                            if (Math.abs(l.size() - itemCount) <= 2
+                                    && (l.size() >= 2 || mediaList(l))) {
                                 java.util.List<PageData> pd = pageDataOf(l);
                                 if (pd != null) {
                                     Log.i("album list found: size=" + pd.size()
@@ -1093,6 +1131,79 @@ public final class LiveVideoPlayer {
         } catch (Throwable t) {
             Log.i("discoverAlbum error: " + t);
         }
+    }
+
+    /**
+     * 在 key_init_bean 的对象图里定向找相册表(限制扫描量,避免大对象图耗尽预算)。
+     * 单图查看器的表只有 1 条元素,不能再用"页数≥2"的启发式。
+     */
+    private static java.util.List<?> findAlbumInBean(Activity act, int itemCount) {
+        try {
+            android.os.Bundle ex = act.getIntent() == null ? null : act.getIntent().getExtras();
+            Object bean = ex == null ? null : ex.get("key_init_bean");
+            if (bean == null) return null;
+            java.util.Set<Object> seen =
+                    java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+            java.util.Deque<Object> q = new java.util.ArrayDeque<>();
+            q.add(bean);
+            seen.add(bean);
+            int scanned = 0;
+            while (!q.isEmpty() && scanned++ < 500) {
+                Object o = q.poll();
+                for (Class<?> c = o.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                    for (Field f : c.getDeclaredFields()) {
+                        if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                        Object v;
+                        try {
+                            f.setAccessible(true);
+                            v = f.get(o);
+                        } catch (Throwable ignored) {
+                            continue;
+                        }
+                        if (v == null || !seen.add(v)) continue;
+                        if (v instanceof java.util.List) {
+                            java.util.List<?> l = (java.util.List<?>) v;
+                            if (l.size() != itemCount || !mediaList(l)) continue;
+                            java.util.List<PageData> pd = pageDataOf(l);
+                            if (pd != null && pd.size() == itemCount) {
+                                Log.i("album list in bean: size=" + l.size()
+                                        + " first=" + (pd.get(0) == null ? "null" : pd.get(0).path));
+                                return l;
+                            }
+                            Log.i("album bean list rejected: size=" + l.size()
+                                    + " elem=" + (l.isEmpty() || l.get(0) == null ? "null"
+                                    : l.get(0).getClass().getName()));
+                        } else if (depthOk(v) && !(v instanceof CharSequence)) {
+                            q.add(v);
+                        }
+                    }
+                }
+            }
+            Log.i("album bean scan done: scanned=" + scanned);
+        } catch (Throwable t) {
+            Log.i("album bean scan error: " + t);
+        }
+        return null;
+    }
+
+    /** 元素是 RFWLayerItemMediaInfo(或至少带 layerPicInfo/_mediaId)的列表才算相册数据。 */
+    private static boolean mediaList(java.util.List<?> l) {
+        if (l.isEmpty()) return false;
+        for (Object e : l) {
+            if (e == null) continue;
+            if (e.getClass().getName().endsWith("RFWLayerItemMediaInfo")) return true;
+            try {
+                XposedHelpers.getObjectField(e, "layerPicInfo");
+                return true;
+            } catch (Throwable ignored) {
+            }
+            try {
+                XposedHelpers.getObjectField(e, "_mediaId");
+                return true;
+            } catch (Throwable ignored) {
+            }
+        }
+        return false;
     }
 
     /** 多图消息诊断:同一消息出现多页时,打出每页的原始 _mediaId(含下标)与解析出的路径。 */
@@ -1313,7 +1424,26 @@ public final class LiveVideoPlayer {
 
     /** 相册映射到手后立即判定首屏这一页(不再等超时)。 */
     private static void applyCurrentPageIfUnknown() {
-        MAIN.post(() -> resolveInitialPage(0, initialSeq));
+        MAIN.post(() -> {
+            int pos = lastSettledPos;
+            PageData d = pos >= 0 ? pageDataAt(pos) : null;
+            // thumb-bound 只是猜的,相册给出的原图路径才是这一页的真身;
+            // 若猜测已经起播且与相册不一致(典型:把上一条实况叠到了回复图片上),立即纠正。
+            String real = d == null ? null : d.path;
+            if (real != null && !LivePhotoDetector.isThumbPath(real)
+                    && !LivePhotoDetector.isCompressedPath(real)
+                    && currentSrc != null && !currentSrc.equals(real)) {
+                Log.i("album mapping corrects page: " + currentSrc + " -> " + real);
+                removeOverlay();
+                currentSrc = null;
+                initialMatch = null;
+                initialResolved = true;
+                Activity a = galleryRef;
+                if (a != null && !a.isFinishing()) applyPage(a, d, pos);
+                return;
+            }
+            resolveInitialPage(0, initialSeq);
+        });
     }
 
     /** 诊断用:列出对象第一层字段名与看起来像路径/记录的值。 */
@@ -1391,24 +1521,36 @@ public final class LiveVideoPlayer {
     }
 
     private static void play(final Activity activity, final String src) {
+        final int seq = pageSeq;
+        final Activity owner = activity;
         EXEC.execute(() -> {
             try {
                 final File vf = extract(src);
                 Log.i("video ready: " + vf.getPath() + " " + (vf.length() / 1024) + "KB");
-                MAIN.post(() -> startOverlay(activity, vf));
+                MAIN.post(() -> {
+                    // 提取期间可能已经退出查看器/翻到别的页:旧视频不能叠到新页面上
+                    if (seq != pageSeq || galleryRef != owner) {
+                        Log.i("stale video dropped: " + src);
+                        return;
+                    }
+                    startOverlay(owner, vf);
+                });
             } catch (Throwable t) {
                 Log.i("extract error: " + t);
-                MAIN.post(() -> android.widget.Toast.makeText(activity,
-                        "实况视频提取失败: " + t.getMessage(), android.widget.Toast.LENGTH_SHORT).show());
+                MAIN.post(() -> {
+                    if (seq != pageSeq || galleryRef != owner) return;
+                    android.widget.Toast.makeText(owner,
+                            "实况视频提取失败: " + t.getMessage(), android.widget.Toast.LENGTH_SHORT).show();
+                });
             }
         });
     }
 
     private static void startOverlay(Activity activity, File vf) {
         try {
+            if (activity == null || galleryRef != activity || activity.isFinishing()) return;
             removeOverlay();
-            final Activity act = galleryRef;
-            if (act == null || act.isFinishing()) return;
+            final Activity act = activity;
             ViewGroup decor = (ViewGroup) act.getWindow().getDecorView();
             final FrameLayout container = new FrameLayout(act);
             VideoView video = new VideoView(act);

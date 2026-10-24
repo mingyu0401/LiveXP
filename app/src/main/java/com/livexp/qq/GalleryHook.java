@@ -36,7 +36,7 @@ public final class GalleryHook {
                 protected void afterHookedMethod(MethodHookParam param) {
                     Activity act = activityOf(param);
                     if (act != null && GALLERY.equals(act.getClass().getName())) {
-                        LiveVideoPlayer.onGalleryPaused();
+                        LiveVideoPlayer.onGalleryPaused(act);
                     }
                 }
             });
@@ -45,7 +45,7 @@ public final class GalleryHook {
                 protected void afterHookedMethod(MethodHookParam param) {
                     Activity act = activityOf(param);
                     if (act != null && GALLERY.equals(act.getClass().getName())) {
-                        LiveVideoPlayer.detach();
+                        LiveVideoPlayer.detach(act);
                     }
                 }
             });
