@@ -104,9 +104,49 @@ public final class LiveVideoPlayer {
         Log.i("live open pending: " + path);
     }
 
+    /** 聊天大图查看器必须能对上是聊天气泡里的图片;群头像/编辑等入口也会复用同一个 Activity。 */
+    private static boolean isChatGallery(Activity activity) {
+        try {
+            android.os.Bundle ex = activity.getIntent() == null ? null : activity.getIntent().getExtras();
+            if (ex == null) return false;
+            if (ex.containsKey("KEY_THUMBNAL_BOUND") || ex.containsKey("MSG_RECORD_STORE_KEY")) return true;
+            // 少数旧入口没有点击矩形和消息仓库 key,但会带完整会话信息
+            return ex.containsKey("extra.GROUP_CODE") && (ex.containsKey("uin") || ex.containsKey("uintype"));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static String galleryMarkers(Activity activity) {
+        try {
+            android.os.Bundle ex = activity.getIntent() == null ? null : activity.getIntent().getExtras();
+            if (ex == null) return "no-extras";
+            return "scene=" + ex.get("layer_scene_id")
+                    + " bound=" + ex.containsKey("KEY_THUMBNAL_BOUND")
+                    + " store=" + ex.containsKey("MSG_RECORD_STORE_KEY")
+                    + " group=" + ex.containsKey("extra.GROUP_CODE")
+                    + " uin=" + ex.containsKey("uin")
+                    + " troopUin=" + ex.containsKey("troopUin")
+                    + " isEdit=" + ex.containsKey("isEdit");
+        } catch (Throwable t) {
+            return "extras-error";
+        }
+    }
+
     /** GalleryHook 在 QQGalleryActivity onResume 后调用。 */
     public static void onGalleryResumed(Activity activity) {
         try {
+            // QQGalleryActivity 也被群头像预览/编辑等页面复用:只处理聊天图片查看器,
+            // 否则会把聊天里上一条实况的视频叠到头像预览上(真机日志实证)。
+            if (!isChatGallery(activity)) {
+                Log.i("skip non-chat gallery: " + galleryMarkers(activity));
+                resetSessionState();
+                galleryRef = null;
+                pendingPath = null;
+                pendingAt = 0;
+                initialSeq++;
+                return;
+            }
             // 上一个查看器还停在 pause(未 destroy)时又开了新的:旧映射不能带进新会话
             if (galleryRef != null && galleryRef != activity) {
                 Log.i("gallery switched without destroy, reset stale session");
@@ -269,6 +309,11 @@ public final class LiveVideoPlayer {
                 // 有点击矩形却没命中任何气泡,说明点的是别的消息(典型:回复气泡里引用的图片)。
                 // 此时绝不能退回"唯一一条实况登记",否则会把旧实况的视频叠到这张图上。
                 Log.i("thumb-bound miss, wait for album mapping");
+                return null;
+            }
+            // 连点击矩形都没有时,"唯一一条登记"只适用于带消息仓库 key 的聊天查看器
+            if (ex == null || !ex.containsKey("MSG_RECORD_STORE_KEY")) {
+                Log.i("no thumb bound and no chat record key, skip onlyOne");
                 return null;
             }
             Match only = onlyOne(LivePhotoDetector.liveBinds, true);
