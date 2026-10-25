@@ -17,8 +17,8 @@ android {
         applicationId 'com.livexp.qq'
         minSdk 27
         targetSdk 36
-        versionCode 73
-        versionName '1.66'
+        versionCode 75
+        versionName '1.68'
     }
 
     signingConfigs {

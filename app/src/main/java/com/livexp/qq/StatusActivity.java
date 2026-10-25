@@ -33,13 +33,8 @@ public class StatusActivity extends Activity {
     private static final String QQ_PKG = "com.tencent.mobileqq";
     /** 探活等待时长:模块进程响应通常在几十毫秒内,1.2s 足够覆盖冷启动。 */
     private static final long PING_WAIT_MS = 1200;
-    /** 页面停留期间的复查间隔:QQ 后启动/模块后启用也能自己变回来。 */
+    /** 页面停留期间的复查间隔:刷新实测版本/阈值,QQ 后启动也能自己补上。 */
     private static final long REFRESH_MS = 5000;
-    /**
-     * 心跳保鲜期:最近这段时间内收到过心跳就仍算已激活。
-     * 探活广播在部分 ROM 上会被延后投递(甚至直接丢弃),一次探活超时就翻灰会让人以为模块失效了。
-     */
-    private static final long HEARTBEAT_STALE_MS = 10 * 60_000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout root;
@@ -132,7 +127,6 @@ public class StatusActivity extends Activity {
     /** 发一次探活广播,等模块回状态;无论结果如何都排下一次复查。 */
     private void checkActive() {
         if (!resumed) return;
-        final long wall = System.currentTimeMillis();
         final long seq = ++checkSeq;
         try {
             Intent ping = new Intent(StatusBridge.ACTION_PING);
@@ -144,10 +138,10 @@ public class StatusActivity extends Activity {
             if (!resumed || seq != checkSeq) return;
             SharedPreferences sp = getSharedPreferences(StatusReceiver.PREFS, MODE_PRIVATE);
             long last = sp.getLong("ts", 0);
-            long now = System.currentTimeMillis();
-            // 本轮探活有回应算激活;探活广播被 ROM 延后时,只要最近心跳还新鲜就保持激活,
-            // 不因为一次超时就把页面刷成灰色。
-            boolean active = last >= wall || (last > 0 && now - last < HEARTBEAT_STALE_MS);
+            // 激活态粘性常亮:只要历史上收到过一次心跳就算已激活,不再因探活超时翻灰。
+            // QQ 进程被杀/心跳暂断只说明宿主没在跑,不代表模块被停用;
+            // 探活继续发,但结果只用来刷新实测版本与阈值。
+            boolean active = last > 0;
             String ver = active ? activeVer(sp) : idleVer(sp);
             stateActive = active;
             stateVer = ver;
