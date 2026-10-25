@@ -818,20 +818,108 @@ public final class LiveSendHook {
 
     /**
      * 只在"单图预览页底栏"里找锚点:必须同时有"原图/编辑"和"发送"。
-     * 相册网格底栏(相册|编辑|原图|发送)也满足前一条,但这时没有选中单张图,
-     * 挂上去只会解析上一张、且占着网格底栏,所以用"相册"这个只出现在网格态的文案排除。
+     * 相册网格底栏(相册|编辑|原图|发送)也满足前一条,但没有选中单张图,
+     * 挂上去只会解析上一张、且占着网格底栏,所以按"相册"文案排除。
+     * 半屏预览与网格共用一个面板时,root 里可能同时有两套"原图"(网格在前),
+     * 被排除的那个记下来,继续找下一个候选;命中过的锚点缓存起来,
+     * 布局风暴(左右滑动)时只做"还活着"的廉价校验,不再全树扫描。
      */
+    private static java.lang.ref.WeakReference<TextView> cachedAnchor;
+    private static java.lang.ref.WeakReference<TextView> cachedSend;
+    private static java.lang.ref.WeakReference<TextView> rejectedAnchor;
+
     private static TextView findPreviewAnchor(View root) {
-        TextView anchor = findText(root, "原图");
-        if (anchor == null) anchor = findText(root, "编辑");
-        if (anchor == null) return null;
-        ViewGroup bar = anchor.getParent() instanceof ViewGroup ? (ViewGroup) anchor.getParent() : null;
-        if (bar == null) return null;
-        // 相册网格底栏(相册|编辑|原图|发送)不算单图预览页
-        if (findText(bar, "相册") != null) return null;
-        if (findSendText(bar) != null) return anchor;
-        // 半屏预览的"发送"有时不在同一个容器里,只要整页里有"发送"就认
-        return findSendText(root) != null ? anchor : null;
+        TextView hit = peek(cachedAnchor);
+        if (hit != null && alive(hit)) {
+            TextView send = peek(cachedSend);
+            if (send != null && alive(send)) return hit;
+            TextView again = findSendText(root);
+            if (again != null) {
+                cachedSend = new java.lang.ref.WeakReference<>(again);
+                return hit;
+            }
+            return null;
+        }
+        TextView anchor = null;
+        ViewGroup bar = null;
+        TextView skip = peek(rejectedAnchor);
+        for (int i = 0; i < 3; i++) {
+            TextView cand = findTextExcept(root, "原图", skip);
+            if (cand == null) break;
+            ViewGroup b = cand.getParent() instanceof ViewGroup
+                    ? (ViewGroup) cand.getParent() : null;
+            if (b == null || findText(b, "相册") != null) {
+                if (b != null && skip != cand) Log.i("跳过网格底栏锚点: " + textsOf(b));
+                skip = cand;
+                rejectedAnchor = new java.lang.ref.WeakReference<>(cand);
+                continue;
+            }
+            anchor = cand;
+            bar = b;
+            break;
+        }
+        if (anchor == null) {
+            TextView cand = findText(root, "编辑");
+            if (cand != null) {
+                ViewGroup b = cand.getParent() instanceof ViewGroup
+                        ? (ViewGroup) cand.getParent() : null;
+                if (b != null && findText(b, "相册") == null) {
+                    anchor = cand;
+                    bar = b;
+                }
+            }
+        }
+        if (anchor == null || bar == null) return null;
+        TextView send = findSendText(bar);
+        if (send == null) send = findSendText(root);
+        if (send == null) return null;
+        cachedAnchor = new java.lang.ref.WeakReference<>(anchor);
+        cachedSend = new java.lang.ref.WeakReference<>(send);
+        return anchor;
+    }
+
+    private static TextView peek(java.lang.ref.WeakReference<TextView> r) {
+        return r == null ? null : r.get();
+    }
+
+    private static boolean alive(View v) {
+        return v.isAttachedToWindow() && v.isShown() && v.getWidth() > 0;
+    }
+
+    /** 与 {@link #findText} 相同,但跳过指定实例(被排除过的网格底栏锚点)。 */
+    private static TextView findTextExcept(View root, String want, TextView skip) {
+        if (root == skip) return null;
+        if (root instanceof TextView && want.equals(((TextView) root).getText())
+                && root.isShown() && root.getWidth() > 0) {
+            return (TextView) root;
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) root;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                TextView hit = findTextExcept(g.getChildAt(i), want, skip);
+                if (hit != null) return hit;
+            }
+        }
+        return null;
+    }
+
+    /** 底栏(含子树)的全部文字,诊断锚点判定用。 */
+    private static String textsOf(View v) {
+        StringBuilder sb = new StringBuilder();
+        collectTexts(v, sb);
+        String s = sb.toString();
+        return s.length() > 200 ? s.substring(0, 200) : s;
+    }
+
+    private static void collectTexts(View v, StringBuilder sb) {
+        if (v instanceof TextView) {
+            CharSequence t = ((TextView) v).getText();
+            if (t != null && t.length() > 0) sb.append('[').append(t).append(']');
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) collectTexts(g.getChildAt(i), sb);
+        }
     }
 
     private static void injectButton(View bottom, int retry) {
@@ -842,7 +930,7 @@ public final class LiveSendHook {
                 if (retry < ANCHOR_RETRY_MAX) {
                     bottom.postDelayed(() -> injectButton(bottom, retry + 1), 250L * (retry + 1));
                 } else {
-                    Log.i("实况转MP4 按钮:没找到原图/编辑锚点,放弃挂载");
+                    Log.i("实况转MP4 按钮:没找到原图/编辑锚点,放弃挂载 bar=" + textsOf(bottom));
                 }
                 return;
             }

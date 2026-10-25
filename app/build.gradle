@@ -17,8 +17,8 @@ android {
         applicationId 'com.livexp.qq'
         minSdk 27
         targetSdk 36
-        versionCode 75
-        versionName '1.68'
+        versionCode 76
+        versionName '1.69'
     }
 
     signingConfigs {
@@ -42,6 +42,15 @@ android {
 
     buildFeatures {
         buildConfig true
+    }
+
+    // 产物命名:LiveXP-v{版本名}({版本号})-release.apk,直接复制到 Downloads 即可交付
+    applicationVariants.all { variant ->
+        if (variant.buildType.name == 'release') {
+            variant.outputs.all { output ->
+                outputFileName = "LiveXP-v${variant.versionName}(${variant.versionCode})-release.apk"
+            }
+        }
     }
 }
 
