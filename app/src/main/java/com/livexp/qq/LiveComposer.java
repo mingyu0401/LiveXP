@@ -25,9 +25,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 实况图 → 「前 3 秒定格 + 之后动态段」MP4 合成。
+ * 实况图 → 「动态段先播 + 收尾 3 秒定格照片」MP4 合成。
  *
- * 单趟编码:定格帧与动态帧都写进同一条 H.264 轨,时间戳由本类统一排。
+ * 单趟编码:动态帧与定格帧都写进同一条 H.264 轨,时间戳由本类统一排。
  * 不做"两段各自编码再拼接",因为那会带上 SPS/PPS 不一致的风险。
  * 只用系统 API(MediaExtractor / MediaCodec / MediaMuxer / Bitmap / Canvas)。
  * 全部工作在 {@link #EXEC} 后台线程,主线程只收回调。
@@ -179,22 +179,11 @@ public final class LiveComposer {
             byte[] u = new byte[(dims[0] / 2) * (dims[1] / 2)];
             byte[] v = new byte[(dims[0] / 2) * (dims[1] / 2)];
 
-            // ---- 段 1:定格画面
-            StillFrame still = buildStill(srcPath, dims[0], dims[1], exif);
-            byte[] sY = still.y;
-            byte[] sU = still.u;
-            byte[] sV = still.v;
             Badge badge = new Badge(dims[0], dims[1]);
             long frameUs = 1_000_000L / FPS;
             int stillFrames = (int) (STILL_US / frameUs);
-            // 只叠一次:逐帧重复 alpha 混合会让半透明底在定格段里"越压越黑",画面不再恒定。
-            badge.blend(sY, sU, sV, dims[0], dims[1]);
-            for (int i = 0; i < stillFrames; i++) {
-                sink.write(sY, sU, sV, dims[0], dims[1], i * frameUs,
-                        i == 0 ? MediaCodec.BUFFER_FLAG_SYNC_FRAME : 0);
-            }
 
-            // ---- 段 2:动态视频轨
+            // ---- 段 1:动态视频轨(实况的动态部分先播)
             vx.selectTrack(vTrack);
             vx.seekTo(0, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
             dec = MediaCodec.createDecoderByType(decMime);
@@ -235,7 +224,7 @@ public final class LiveComposer {
                         badge.blend(y, u, v, dims[0], dims[1]);
                         long pts = Math.max(0, bi.presentationTimeUs);
                         if (pts < firstPts || firstPts == Long.MIN_VALUE) firstPts = pts;
-                        long outPts = STILL_US + (pts - firstPts);
+                        long outPts = pts - firstPts;
                         if (outPts < lastPts) outPts = lastPts;
                         lastPts = outPts;
                         sink.write(y, u, v, dims[0], dims[1], outPts,
@@ -247,10 +236,20 @@ public final class LiveComposer {
                 if ((bi.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) eos = true;
             }
             if (frames == 0) throw new IllegalStateException("动态段一帧都没解出来");
-            out.durationUs = lastPts + frameUs;
+            long motionEndUs = lastPts + frameUs;
+
+            // ---- 段 2:定格画面(动态播完后停在照片上)
+            StillFrame still = buildStill(srcPath, dims[0], dims[1], exif);
+            // 只叠一次:逐帧重复 alpha 混合会让半透明底在定格段里"越压越黑",画面不再恒定。
+            badge.blend(still.y, still.u, still.v, dims[0], dims[1]);
+            for (int i = 0; i < stillFrames; i++) {
+                sink.write(still.y, still.u, still.v, dims[0], dims[1], motionEndUs + i * frameUs,
+                        i == 0 ? MediaCodec.BUFFER_FLAG_SYNC_FRAME : 0);
+            }
+            out.durationUs = motionEndUs + stillFrames * frameUs;
             sink.finish();
             if (af != null && sink.audioTrack >= 0) {
-                out.hasAudio = remuxAudio(vx, vTrack, aTrack, muxer, sink.audioTrack);
+                out.hasAudio = remuxAudio(vx, vTrack, aTrack, muxer, sink.audioTrack, motionEndUs);
             }
             out.file = tmp;
             ok = true;
@@ -382,9 +381,9 @@ public final class LiveComposer {
         }
     }
 
-    /** 音频不重编码,整条 remux,时间戳整体后移一个定格段。 */
+    /** 音频不重编码,整条 remux,时间戳整体后移到动态段之后。 */
     private static boolean remuxAudio(MediaExtractor ex, int videoTrack, int track, MediaMuxer muxer,
-                                      int idx) {
+                                      int idx, long shiftUs) {
         try {
             ex.unselectTrack(videoTrack);
             ex.selectTrack(track);
@@ -397,7 +396,7 @@ public final class LiveComposer {
                 buf.limit(n);
                 bi.offset = 0;
                 bi.size = n;
-                bi.presentationTimeUs = Math.max(0, ex.getSampleTime()) + STILL_US;
+                bi.presentationTimeUs = Math.max(0, ex.getSampleTime()) + shiftUs;
                 bi.flags = 0;
                 muxer.writeSampleData(idx, buf, bi);
                 ex.advance();
