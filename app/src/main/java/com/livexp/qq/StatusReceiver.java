@@ -19,6 +19,7 @@ public class StatusReceiver extends BroadcastReceiver {
                 .putString("lsposed", intent.getStringExtra("lsposed"))
                 .putInt("api", intent.getIntExtra("api", -1))
                 .putString("qq", intent.getStringExtra("qq"))
+                .putLong("threshold", intent.getLongExtra("threshold", -1))
                 .apply();
     }
 }

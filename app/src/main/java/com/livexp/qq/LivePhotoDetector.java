@@ -24,14 +24,17 @@ import de.robv.android.xposed.XposedHelpers;
 /**
  * 实况图片(动态照片)判定。元数据路线(PicElement 字段 dump 校准)已确认没有字段级判据,
  * QQ 接收方自身也不识别实况,故采用文件级判定:
- * 本地文件 >= 1MB 且具备动态照片特征 ——
+ * 本地文件 >= 检测阈值(默认 1MB,模块设置页可调)且具备动态照片特征 ——
  *  1. 头部 XMP 标记 MicroVideo / MotionPhoto(Android 动态照片)
  *  2. 尾部三星 MotionPhoto_Data 标记
  *  3. 苹果实况图:JPEG 内嵌 QuickTime MOV(文件中出现 ftyp 盒,流式全文件搜索)
  */
 public final class LivePhotoDetector {
 
-    public static final long MIN_DETECT_BYTES = 1024L * 1024L;
+    /** 实况检测大小阈值(字节,模块设置页可调,默认 1MB):文件 ≥ 阈值才进入扫描/反查。 */
+    public static long minDetectBytes() {
+        return ThresholdConfig.get();
+    }
 
     private static final byte[] NEEDLE_MICRO_VIDEO = "MicroVideo".getBytes();
     private static final byte[] NEEDLE_MOTION_PHOTO = "MotionPhoto".getBytes();
@@ -49,7 +52,7 @@ public final class LivePhotoDetector {
     private static final ExecutorService SCAN_EXEC = Executors.newSingleThreadExecutor();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
-    // md5 持久库:库1=已确认实况,库2=已确认非实况。只在文件真实存在(≥1MB)后记录,
+    // md5 持久库:库1=已确认实况,库2=已确认非实况。只在文件真实存在(≥检测阈值)后记录,
     // 跨重启免重扫;文件还没下载到本地时不产生任何记录,等下次 bind 再判。
     private static final File MD5_LIVE_FILE =
             new File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/md5_live.txt");
@@ -323,7 +326,7 @@ public final class LivePhotoDetector {
     }
 
     /**
-     * 异步判定一个本地文件是否实况(>=1MB 且含动态照片特征)。
+     * 异步判定一个本地文件是否实况(>= 检测阈值且含动态照片特征)。
      * 命中后把消息 msgId 记入 liveMsgIds;若气泡还活着,直接在主线程补打标。
      */
     public static void detectAsync(String path, Object msgRecord, ViewGroup boundRoot) {
@@ -360,7 +363,7 @@ public final class LivePhotoDetector {
                 File f = new File(path);
                 boolean exists = f.isFile();
                 long size = f.length();
-                boolean live = exists && size >= MIN_DETECT_BYTES && isMotionPhotoFile(path);
+                boolean live = exists && size >= minDetectBytes() && isMotionPhotoFile(path);
                 // 文件还没下载到本地时不要缓存结论,等原图落盘后 bind 再触发可重新判定;
                 // chatimg/chatthumb 是压缩缓存,扫出 static 也不能写库(原图下载后还要重新判)
                 boolean cacheable = exists && (live || !isCompressedPath(path));
@@ -369,7 +372,7 @@ public final class LivePhotoDetector {
                         + " size=" + (size / 1024) + "KB -> " + (live ? "LIVE" : "static")
                         + (exists ? " magic=" + magicHex(f) : "")
                         + (isCompressedPath(path) ? " compressed=1" : ""));
-                if (cacheable && size >= MIN_DETECT_BYTES) recordMd5(md5, live);
+                if (cacheable && size >= minDetectBytes()) recordMd5(md5, live);
                 if (live) {
                     liveHitCount++;
                     Log.i("live photo detected: " + path + (picIndex >= 0 ? " idx=" + picIndex : ""));
@@ -394,6 +397,8 @@ public final class LivePhotoDetector {
             "/storage/emulated/0/Android/data/com.tencent.mobileqq/Tencent/MobileQQ/chatpic/chatraw";
     private static final java.util.Map<Long, java.util.List<String>> sizeIndex = new java.util.HashMap<>();
     private static boolean sizeIndexBuilt;
+    /** 建索引时用的阈值;滑块改了阈值就重建索引,更小的原图也能被反查到。 */
+    private static long sizeIndexBuiltThreshold = Long.MIN_VALUE;
     private static volatile long sizeIndexBuiltAt;
     private static final Map<String, String> metaPathHit = new ConcurrentHashMap<>();
     private static final Set<String> metaPathMiss = ConcurrentHashMap.newKeySet();
@@ -407,7 +412,7 @@ public final class LivePhotoDetector {
     public static void resolvePathByMetaAsync(Object msgRecord, ViewGroup boundRoot, int picIndex) {
         final long size = picFileSizeAt(msgRecord, picIndex);
         final String md5 = picMd5OfAt(msgRecord, picIndex);
-        if (size < MIN_DETECT_BYTES || md5 == null) return;
+        if (size < minDetectBytes() || md5 == null) return;
         final String key = size + ":" + md5;
         if (!metaPending.add(key)) return;
         SCAN_EXEC.execute(() -> {
@@ -436,13 +441,13 @@ public final class LivePhotoDetector {
     public static String findOriginalByMeta(Object msgRecord, int idx) {
         long size = picFileSizeAt(msgRecord, idx);
         String md5 = picMd5OfAt(msgRecord, idx);
-        if (size < MIN_DETECT_BYTES || md5 == null) return null;
+        if (size < minDetectBytes() || md5 == null) return null;
         return findPathByMeta(size, md5, false);
     }
 
     /** 用消息元素以外的元数据(size+md5)反查刚下载的原图。 */
     public static String findOriginalBySizeMd5(long size, String md5) {
-        if (size < MIN_DETECT_BYTES || md5 == null) return null;
+        if (size < minDetectBytes() || md5 == null) return null;
         return findPathByMeta(size, md5, false);
     }
 
@@ -461,7 +466,7 @@ public final class LivePhotoDetector {
             if (v instanceof String) md5 = ((String) v).trim().toLowerCase(Locale.US);
         } catch (Throwable ignored) {
         }
-        if (size < MIN_DETECT_BYTES || md5 == null || md5.isEmpty()) return null;
+        if (size < minDetectBytes() || md5 == null || md5.isEmpty()) return null;
         return findPathByMeta(size, md5, false);
     }
 
@@ -514,11 +519,14 @@ public final class LivePhotoDetector {
         return null;
     }
 
-    /** chatraw 按文件大小建索引(只收 ≥1MB 的原图),进程内只建一次。 */
+    /** chatraw 按文件大小建索引(只收 ≥ 检测阈值的原图),阈值不变时进程内只建一次。 */
     private static void buildSizeIndex() {
         synchronized (sizeIndex) {
-            if (sizeIndexBuilt) return;
+            long threshold = minDetectBytes();
+            if (sizeIndexBuilt && sizeIndexBuiltThreshold == threshold) return;
+            sizeIndex.clear();
             sizeIndexBuilt = true;
+            sizeIndexBuiltThreshold = threshold;
             sizeIndexBuiltAt = System.currentTimeMillis();
             collectSizes(new File(CHATRAW_DIR), 0);
             Log.i("chatraw size index: " + sizeIndex.size() + " sizes");
@@ -534,7 +542,7 @@ public final class LivePhotoDetector {
                 continue;
             }
             long len = f.length();
-            if (len < MIN_DETECT_BYTES) continue;
+            if (len < minDetectBytes()) continue;
             java.util.List<String> l = sizeIndex.get(len);
             if (l == null) {
                 l = new java.util.ArrayList<>(2);
@@ -782,7 +790,7 @@ public final class LivePhotoDetector {
     public static boolean isLiveFile(String path) {
         try {
             File f = new File(path);
-            if (!f.isFile() || f.length() < MIN_DETECT_BYTES) return false;
+            if (!f.isFile() || f.length() < minDetectBytes()) return false;
             return isMotionPhotoFile(path);
         } catch (Throwable ignored) {
             return false;

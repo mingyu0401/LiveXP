@@ -18,6 +18,8 @@ final class StatusBridge {
 
     static final String ACTION_STATUS = "com.livexp.qq.STATUS";
     static final String ACTION_PING = "com.livexp.qq.PING";
+    /** 独立 App 写不了 QQ 的 Android/data 目录时,托 QQ 进程里的模块代写阈值。 */
+    static final String ACTION_SET_THRESHOLD = "com.livexp.qq.SET_THRESHOLD";
     private static final String APP_PKG = "com.livexp.qq";
     private static final String APP_RECEIVER = APP_PKG + ".StatusReceiver";
     /** 独立 App 的 StatusProvider(写心跳主通道)。 */
@@ -66,11 +68,21 @@ final class StatusBridge {
         installed = true;
         try {
             IntentFilter filter = new IntentFilter(ACTION_PING);
+            filter.addAction(ACTION_SET_THRESHOLD);
             BroadcastReceiver ping = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     final Context c = context == null ? ctx : context;
                     // provider 调用是同步 binder,放到后台线程,别堵 QQ 主线程
+                    if (intent != null && ACTION_SET_THRESHOLD.equals(intent.getAction())) {
+                        final long bytes = intent.getLongExtra("bytes", -1);
+                        new Thread(() -> {
+                            boolean ok = ThresholdConfig.set(bytes);
+                            Log.i("threshold set via app bridge: bytes=" + bytes + " ok=" + ok);
+                            report(c, "threshold");
+                        }, "LiveXP-status").start();
+                        return;
+                    }
                     new Thread(() -> report(c, "ping"), "LiveXP-status").start();
                 }
             };
@@ -98,6 +110,7 @@ final class StatusBridge {
             b.putString("lsposed", LspInfo.lsposedVersion);
             b.putInt("api", LspInfo.apiVersion);
             b.putString("qq", LspInfo.qqVersion);
+            b.putLong("threshold", ThresholdConfig.get());
             try {
                 ctx.getPackageManager().getPackageInfo(APP_PKG, 0);
                 Log.i("status bridge: target app visible");
