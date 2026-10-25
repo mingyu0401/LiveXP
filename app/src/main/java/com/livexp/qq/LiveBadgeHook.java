@@ -113,6 +113,12 @@ public final class LiveBadgeHook {
         Object host = hostViewGetter.invoke(param.thisObject);
         if (!(host instanceof ViewGroup)) return;
         ViewGroup root = (ViewGroup) host;
+        // 「解析实况」合成出去的视频消息没有 PicElement,图片判定走不到它,单独按合成登记贴标。
+        if (LiveSendMarks.isLiveVideoMsg(msgRecord)) {
+            Log.i("badge: 合成实况视频消息贴标 msgId=" + LivePhotoDetector.msgIdOf(msgRecord));
+            BadgeInjector.showOverMedia(root);
+            return;
+        }
         if (!LivePhotoDetector.hasPic(msgRecord)) {
             BadgeInjector.hide(root);
             return;

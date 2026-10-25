@@ -544,7 +544,7 @@ public final class LivePhotoDetector {
         }
     }
 
-    private static String md5OfFile(String path) {
+    static String md5OfFile(String path) {
         try (java.io.FileInputStream in = new java.io.FileInputStream(path)) {
             java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
             byte[] buf = new byte[256 * 1024];

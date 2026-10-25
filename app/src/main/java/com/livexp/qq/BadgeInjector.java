@@ -27,11 +27,25 @@ public final class BadgeInjector {
         show(root, -1);
     }
 
+    /** 视频气泡:角标贴到承载画面的 TextureView/SurfaceView 上,而不是头像 ImageView。 */
+    public static void showOverMedia(ViewGroup root) {
+        show(root, -1, true);
+    }
+
     /** picIndex = 消息里第几张图(-1 表示不区分,贴在最大的那张上)。 */
     public static void show(ViewGroup root, int picIndex) {
+        show(root, picIndex, false);
+    }
+
+    private static void show(ViewGroup root, int picIndex, boolean overMedia) {
         int slot = Math.max(0, Math.min(MAX_BADGES - 1, picIndex));
         int id = BADGE_ID + slot;
-        if (root.findViewById(id) != null) return;
+        View existing = root.findViewById(id);
+        if (existing != null) {
+            // 气泡 View 会被 RecyclerView 复用:已有角标时也要按当前消息重算一次位置。
+            positionOverImage(root, existing, picIndex, overMedia);
+            return;
+        }
         Context ctx = root.getContext();
         FrameLayout badge = new FrameLayout(ctx);
         badge.setId(id);
@@ -50,20 +64,55 @@ public final class BadgeInjector {
             lp.height = size;
             badge.setLayoutParams(lp);
         }
-        positionOverImage(root, badge, picIndex);
+        positionOverImage(root, badge, picIndex, overMedia);
         // 绑定时子视图往往还没布局,布局完成后再校正位置
         badge.post(() -> {
-            if (badge.getParent() == root) positionOverImage(root, badge, picIndex);
+            if (badge.getParent() == root) positionOverImage(root, badge, picIndex, overMedia);
         });
     }
 
-    private static void positionOverImage(ViewGroup root, View badge, int picIndex) {
-        View anchor = imageFor(root, picIndex);
+    private static void positionOverImage(ViewGroup root, View badge, int picIndex,
+                                          boolean overMedia) {
+        View anchor = overMedia ? mediaSurfaceFor(root) : imageFor(root, picIndex);
+        if (anchor == null) anchor = mediaSurfaceFor(root);
         if (anchor == null) return;
         int[] pos = offsetInRoot(root, anchor);
         if (pos == null) return;
         badge.setTranslationX(pos[0] + anchor.getWidth() - badge.getWidth() - dp(root.getContext(), 4));
         badge.setTranslationY(pos[1] + dp(root.getContext(), 4));
+        if (overMedia) {
+            Log.i("视频角标锚点: " + anchor.getClass().getName() + " " + anchor.getWidth() + "x"
+                    + anchor.getHeight() + " tx=" + badge.getTranslationX()
+                    + " ty=" + badge.getTranslationY());
+        }
+    }
+
+    /**
+     * 视频气泡里没有承载消息画面的 ImageView(内容是 TextureView/SurfaceView),
+     * 角标退而贴到最大的那块媒体画面上。
+     */
+    private static View mediaSurfaceFor(ViewGroup root) {
+        View best = null;
+        long bestArea = 0;
+        List<View> stack = new ArrayList<>();
+        stack.add(root);
+        while (!stack.isEmpty()) {
+            View v = stack.remove(stack.size() - 1);
+            if (v instanceof ViewGroup) {
+                ViewGroup g = (ViewGroup) v;
+                for (int i = 0; i < g.getChildCount(); i++) stack.add(g.getChildAt(i));
+            }
+            String cls = v.getClass().getName();
+            boolean media = cls.contains("TextureView") || cls.contains("SurfaceView")
+                    || v instanceof ImageView;
+            if (!media || v.getWidth() <= 0) continue;
+            long area = (long) v.getWidth() * v.getHeight();
+            if (area > bestArea) {
+                bestArea = area;
+                best = v;
+            }
+        }
+        return best;
     }
 
     /** 第 picIndex 张消息图;下标越界时退回最大的那张。 */

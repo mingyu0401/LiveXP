@@ -54,6 +54,11 @@ public class HookEntry implements IXposedHookLoadPackage {
             Log.i("gallery hook failed: " + t);
         }
         try {
+            LiveSendHook.install(realCl);
+        } catch (Throwable t) {
+            Log.i("send hook failed: " + t);
+        }
+        try {
             SettingsEntryHook.install(realCl);
         } catch (Throwable t) {
             Log.i("settings entry failed: " + t);
