@@ -35,6 +35,11 @@ public class StatusActivity extends Activity {
     private static final long PING_WAIT_MS = 1200;
     /** 页面停留期间的复查间隔:QQ 后启动/模块后启用也能自己变回来。 */
     private static final long REFRESH_MS = 5000;
+    /**
+     * 心跳保鲜期:最近这段时间内收到过心跳就仍算已激活。
+     * 探活广播在部分 ROM 上会被延后投递(甚至直接丢弃),一次探活超时就翻灰会让人以为模块失效了。
+     */
+    private static final long HEARTBEAT_STALE_MS = 10 * 60_000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private LinearLayout root;
@@ -138,7 +143,11 @@ public class StatusActivity extends Activity {
         handler.postDelayed(() -> {
             if (!resumed || seq != checkSeq) return;
             SharedPreferences sp = getSharedPreferences(StatusReceiver.PREFS, MODE_PRIVATE);
-            boolean active = sp.getLong("ts", 0) >= wall;
+            long last = sp.getLong("ts", 0);
+            long now = System.currentTimeMillis();
+            // 本轮探活有回应算激活;探活广播被 ROM 延后时,只要最近心跳还新鲜就保持激活,
+            // 不因为一次超时就把页面刷成灰色。
+            boolean active = last >= wall || (last > 0 && now - last < HEARTBEAT_STALE_MS);
             String ver = active ? activeVer(sp) : idleVer(sp);
             stateActive = active;
             stateVer = ver;

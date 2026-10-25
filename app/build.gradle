@@ -17,7 +17,7 @@ android {
         applicationId 'com.livexp.qq'
         minSdk 27
         targetSdk 36
-        versionCode 71
+        versionCode 73
         versionName '1.66'
     }
 

@@ -402,7 +402,8 @@ public final class ModuleAboutPage {
                 .append(";-webkit-text-fill-color:").append(sub).append(";animation:none}")
                 .append("body.off #markOn{display:none}")
                 .append("body.off #markOff{display:block}")
-                .append("</style></head><body class='").append(active ? "on" : "off").append("'>")
+                .append("</style></head><body class='").append(appMode ? "app " : "")
+                .append(active ? "on" : "off").append("'>")
                 .append("<div class='hero' id='hero'><div class='ring'></div>")
                 .append("<div class='mark' id='markOn'>").append(markSvg(sub, true)).append("</div>")
                 .append("<div class='mark' id='markOff'>").append(markSvg(sub, false)).append("</div></div>")
@@ -478,12 +479,23 @@ public final class ModuleAboutPage {
     /** 长按顶部图案:430ms 后触发 3 秒渐快震动(Android 侧执行),松手/滑走即停。 */
     private static String script() {
         return "<script>"
+                + "var livexpForced=false;"
                 + "function livexpState(active,ver){"
+                + "if(livexpForced){var vf=document.getElementById('verLine');"
+                + "if(vf&&ver)vf.textContent=ver;return;}"
                 + "document.body.classList.toggle('off',!active);"
                 + "var t=document.getElementById('stateTitle');"
                 + "if(t)t.textContent=active?'LiveXP 已激活':'LiveXP 未激活';"
                 + "var v=document.getElementById('verLine');"
                 + "if(v&&ver)v.textContent=ver;}"
+                // 长按顶部图案:除了震动,还把页面摆成「已激活」的样子(只是表现效果,不会真改模块状态)
+                + "function livexpForceOn(){"
+                + "if(!document.body.classList.contains('app'))return;"
+                + "livexpForced=true;"
+                + "document.body.classList.remove('off');"
+                + "document.body.classList.add('on');"
+                + "var t=document.getElementById('stateTitle');"
+                + "if(t)t.textContent='LiveXP 已激活';}"
                 + "var thS=document.getElementById('thSlider'),"
                 + "thV=document.getElementById('thVal'),"
                 + "thT=document.getElementById('thState'),"
@@ -517,7 +529,9 @@ public final class ModuleAboutPage {
                 + "(function(){"
                 + "var hero=document.getElementById('hero');if(!hero)return;"
                 + "var timer=null,fired=false,sx=0,sy=0,lastBuzz=0;"
-                + "function buzz(){var n=Date.now();if(n-lastBuzz<1500)return;lastBuzz=n;fired=true;try{if(window.LiveXPHaptic){LiveXPHaptic.buzz();}else{location.href='livexp://haptic';}}catch(e){}}"
+                + "function buzz(){var n=Date.now();if(n-lastBuzz<1500)return;lastBuzz=n;fired=true;"
+                + "try{livexpForceOn();}catch(e){}"
+                + "try{if(window.LiveXPHaptic){LiveXPHaptic.buzz();}else{location.href='livexp://haptic';}}catch(e){}}"
                 + "function stopBuzz(){if(fired){fired=false;try{if(window.LiveXPHaptic){LiveXPHaptic.stop();}else{location.href='livexp://hapticstop';}}catch(e){}}}"
                 + "hero.addEventListener('touchstart',function(e){if(timer||fired)return;"
                 + "var t=e.touches&&e.touches[0];if(t){sx=t.clientX;sy=t.clientY;}"
