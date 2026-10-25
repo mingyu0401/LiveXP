@@ -108,6 +108,8 @@ public final class LiveSendHook {
         boolean sent;
         /** 用户点了发送,等转码完成后自动发出。 */
         boolean autoSend;
+        /** 面板打开后的自动排队转码(与用户点击无关,只是预热产物)。 */
+        boolean autoQueued;
         Object autoItem;
         LiveComposer.Out out;
         /** 被按住的发送结果,转码完成后放行。 */
@@ -244,8 +246,8 @@ public final class LiveSendHook {
     }
 
     /**
-     * 选中(点开预览)已判定为实况的图片:自动勾上转码并立刻后台合成,
-     * 用户到发送时产物通常已就绪。总开关「实况转MP4」关闭时不做。
+     * 选中(点开预览)已判定为实况的图片:置 armed(发送时替换成视频)并确保转码在跑。
+     * 「实况转MP4」开关关闭时不做。
      */
     private static void autoArmIfNeeded(String path) {
         if (path == null) return;
@@ -256,21 +258,42 @@ public final class LiveSendHook {
             IO.execute(() -> {
                 boolean l = LivePhotoDetector.isLiveFile(path);
                 liveVerdict.put(path, l);
-                if (l) MAIN.post(() -> autoArmNow(path));
+                if (l) MAIN.post(() -> autoArmIfNeeded(path));
             });
             return;
         }
-        if (live) autoArmNow(path);
+        if (!live) return;
+        armedPaths.add(path);
+        Job j = job(path);
+        j.checked = true;
+        if (j.status == ST_NONE && !j.autoQueued) {
+            j.autoQueued = true;
+            startParse(path, j);
+        }
+        refreshButtons();
     }
 
-    private static void autoArmNow(String path) {
+    /** 用户点按钮启用转码的图(发送时替换成视频);网格进度文案按这个集合统计。 */
+    private static final java.util.Set<String> armedPaths = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** 面板打开即自动排队转码(预热,发送是否替换由 armed 决定)。 */
+    private static void autoQueue(String path) {
+        if (path == null) return;
+        Boolean live = liveVerdict.get(path);
+        if (live == null) {
+            IO.execute(() -> {
+                boolean l = LivePhotoDetector.isLiveFile(path);
+                liveVerdict.put(path, l);
+                if (l) MAIN.post(() -> autoQueue(path));
+            });
+            return;
+        }
+        if (!live) return;
         Job j = job(path);
-        if (j.checked || j.status == ST_PARSING || j.status == ST_READY) return;
-        j.checked = true;
-        j.sent = false;
-        Log.i("选中实况图,自动开始转码: " + path);
+        if (j.autoQueued || j.checked || j.status == ST_PARSING || j.status == ST_READY) return;
+        j.autoQueued = true;
+        Log.i("面板打开,自动排队转码: " + path);
         startParse(path, j);
-        refreshButtons();
     }
 
     private static void hookSend(Class<?> owner) {
@@ -339,60 +362,73 @@ public final class LiveSendHook {
         Intent data = intentIn(param.args);
         if (data == null) return;
         if (data == replayIntent) return;
-        Job j = matchPendingJob(data);
-        if (j == null) return;
-        if (j.status == ST_PARSING) {
-            j.pending = new Pending();
-            j.pending.method = param.method instanceof Method ? (Method) param.method : null;
-            j.pending.target = param.thisObject;
-            j.pending.args = param.args == null ? new Object[0] : param.args.clone();
-            j.pending.data = data;
+        List<Job> hits = matchJobs(data);
+        if (hits == null || hits.isEmpty()) return;
+        // 有还在转码的(用户点了发送但没转完):按住结果,等转码完成再放行
+        Pending hold = null;
+        for (Job j : hits) {
+            if (j.status == ST_PARSING) {
+                if (hold == null) {
+                    hold = new Pending();
+                    hold.method = param.method instanceof Method ? (Method) param.method : null;
+                    hold.target = param.thisObject;
+                    hold.args = param.args == null ? new Object[0] : param.args.clone();
+                    hold.data = data;
+                }
+                j.pending = hold;
+            }
+        }
+        if (hold != null) {
             param.setResult(null);
-            Log.i("发送结果已按住,转码完成后放行 path=" + j.path);
+            Log.i("发送结果已按住,等转码完成后放行 " + holdJobsText(hits));
             return;
         }
-        // 转码已完成(或失败):就绪就把结果里的图片换成视频副本再放行
-        if (j.status == ST_READY && j.out != null && swapInResult(data, j)) {
-            Log.i("发送结果里的图片换成合成视频 path=" + j.path);
-            LiveSendMarks.remember(j.out.md5, j.out.storePath);
-            scheduleDelete(j.out);
+        boolean anySwapped = false;
+        for (Job j : hits) {
+            if (j.status == ST_READY && j.out != null && swapInResult(data, j)) {
+                Log.i("发送结果里的图片换成合成视频 path=" + j.path);
+                LiveSendMarks.remember(j.out.md5, j.out.storePath);
+                scheduleDelete(j.out);
+                anySwapped = true;
+            }
+            j.autoSend = false;
+            j.pending = null;
+            armedPaths.remove(j.path);
+            jobs.remove(j.path);
         }
-        j.autoSend = false;
-        j.pending = null;
-        jobs.remove(j.path);
+    }
+
+    private static String holdJobsText(List<Job> jobs) {
+        StringBuilder sb = new StringBuilder();
+        for (Job j : jobs) sb.append(j.path.substring(j.path.lastIndexOf('/') + 1)).append(' ');
+        return sb.toString();
     }
 
     /**
-     * 结果里的媒体列表里有没有我们等着的那张图。
-     * 网格发送不走 onSendClick(没有 autoSend 标记),所以只要这张图已合成完毕(READY),
-     * 结果回传里出现它的原图路径就顺手换成视频副本。
+     * 结果回传里命中的 job 列表:预览页发送(autoSend)或用户点过按钮的图(armedPaths)。
+     * 网格发送不走 onSendClick,靠 armedPaths 匹配。
      */
-    private static Job matchPendingJob(Intent data) {
+    private static List<Job> matchJobs(Intent data) {
         List<Object> list = resultList(data);
         if (list == null) return null;
-        Job fallback = null;
+        List<Job> hits = new java.util.ArrayList<>();
         for (Job j : jobs.values()) {
-            if (j.autoSend) {
-                for (Object o : list) {
-                    if (o == null) continue;
-                    if (o == j.autoItem) return j;
-                    String p = pathOf(o);
-                    if (p != null && p.equals(j.path)) return j;
+            boolean inResult = false;
+            for (Object o : list) {
+                if (o == null) continue;
+                if (o == j.autoItem) {
+                    inResult = true;
+                    break;
                 }
-                continue;
-            }
-            if (fallback == null && j.status == ST_READY && j.out != null) {
-                for (Object o : list) {
-                    if (o == null) continue;
-                    String p = pathOf(o);
-                    if (p != null && p.equals(j.path)) {
-                        fallback = j;
-                        break;
-                    }
+                String p = pathOf(o);
+                if (p != null && p.equals(j.path)) {
+                    inResult = true;
+                    break;
                 }
             }
+            if (inResult && (j.autoSend || armedPaths.contains(j.path))) hits.add(j);
         }
-        return fallback;
+        return hits;
     }
 
     /** 把结果里的媒体项换成合成视频的副本,相册里的原图对象不动。 */
@@ -492,22 +528,39 @@ public final class LiveSendHook {
         return null;
     }
 
-    /** 转码完成后放行被按住的发送结果。 */
-    private static void releasePending(Job j) {
-        Pending p = j.pending;
-        j.pending = null;
+    /** 转码完成后放行被按住的发送结果(可能多个 job 共享同一个 Pending)。 */
+    private static void releasePending(Job trigger) {
+        Pending p = trigger.pending;
+        trigger.pending = null;
         if (p == null) return;
-        boolean withVideo = false;
-        if (j.status == ST_READY && j.out != null && swapInResult(p.data, j)) {
-            withVideo = true;
-            Log.i("放行发送结果:已换成合成视频 path=" + j.path);
-            LiveSendMarks.remember(j.out.md5, j.out.storePath);
-            scheduleDelete(j.out);
-        } else {
-            Log.i("放行发送结果:按原图发送 path=" + j.path);
+        // 收集所有引用同一个 Pending 的 job,统一放行
+        List<Job> group = new java.util.ArrayList<>();
+        for (Job j : jobs.values()) {
+            if (j.pending == p) {
+                j.pending = null;
+                group.add(j);
+            }
         }
-        j.autoSend = false;
-        jobs.remove(j.path);
+        boolean anySwapped = false;
+        for (Job j : group) {
+            if (j.status == ST_READY && j.out != null && swapInResult(p.data, j)) {
+                Log.i("放行发送结果:已换成合成视频 path=" + j.path);
+                LiveSendMarks.remember(j.out.md5, j.out.storePath);
+                scheduleDelete(j.out);
+                anySwapped = true;
+            } else {
+                Log.i("放行发送结果:按原图发送 path=" + j.path);
+                if (j.out != null) {
+                    LiveComposer.discard(j.out);
+                    j.out = null;
+                }
+            }
+        }
+        for (Job j : group) {
+            j.autoSend = false;
+            armedPaths.remove(j.path);
+            jobs.remove(j.path);
+        }
         replayIntent = p.data;
         try {
             if (p.method != null) p.method.invoke(p.target, p.args);
@@ -515,10 +568,6 @@ public final class LiveSendHook {
             Log.i("回放发送结果失败: " + t);
         } finally {
             replayIntent = null;
-        }
-        if (!withVideo && j.out != null) {
-            LiveComposer.discard(j.out);
-            j.out = null;
         }
     }
 
@@ -883,17 +932,35 @@ public final class LiveSendHook {
     /** 窗口级"没有预览底栏"负缓存:聊天页常驻但永远没有原图/编辑,别每次布局都全树扫。 */
     private static final java.util.WeakHashMap<View, Long> noAnchorUntil = new java.util.WeakHashMap<>();
 
+    /** 按钮从其父容器(含浮层态)上摘掉;面板关闭时必须收干净,否则残留在聊天界面上。 */
+    private static void removeButton(View root) {
+        View b = root.findViewById(BTN_ID);
+        if (b != null && b.getParent() instanceof ViewGroup) {
+            ((ViewGroup) b.getParent()).removeView(b);
+            synchronized (buttons) {
+                buttons.values().remove(b);
+            }
+        }
+    }
+
     private static void ensureButton(View root) {
         if (root == null) return;
         try {
             ensureGridAdapter(root);
             Long until = noAnchorUntil.get(root);
             long now = System.currentTimeMillis();
-            if (until != null && now < until) return;
-            TextView anchor = findPreviewAnchor(root);
-            if (anchor == null) {
-                PreviewBadge.hide(root);
-                noAnchorUntil.put(root, now + 1500L);
+            boolean scanning = until == null || now >= until;
+            TextView anchor = scanning ? findPreviewAnchor(root) : peek(cachedAnchor);
+            if (anchor == null || !alive(anchor)) {
+                // 只有真正扫过确认没有底栏才收按钮:面板开着时负缓存期间不动它
+                if (scanning) {
+                    removeButton(root);
+                    PreviewBadge.hide(root);
+                    noAnchorUntil.put(root, now + 1500L);
+                    currentPath = null;
+                    cachedAnchor = null;
+                    cachedSend = null;
+                }
                 return;
             }
             noAnchorUntil.remove(root);
@@ -1135,13 +1202,33 @@ public final class LiveSendHook {
     private static void toggle(TextView btn) {
         String path = currentPath;
         if (path == null) {
-            // 网格态(半屏/全屏相册面板):按当前勾选的那张图处理
+            // 网格态(半屏/全屏相册面板):按当前勾选的那张图启用/取消
             String picked = selectedGridPath();
             if (picked == null) {
                 toast("先勾选一张图片(一次一张)");
                 return;
             }
-            path = picked;
+            Job j = job(picked);
+            if (armedPaths.contains(picked)) {
+                // 再点一次 = 取消:发送时按原图发出,产物留作预热
+                armedPaths.remove(picked);
+                j.checked = false;
+                j.autoSend = false;
+                j.autoItem = null;
+                if (j.pending != null) releasePending(j);
+                if (j.deferred != null) releaseDeferred(j);
+                toast("已取消该图的实况转MP4");
+            } else {
+                armedPaths.add(picked);
+                j.checked = true;
+                j.sent = false;
+                if (j.status == ST_NONE && !j.autoQueued) {
+                    j.autoQueued = true;
+                    startParse(picked, j);
+                }
+            }
+            refreshButtons();
+            return;
         }
         if (!LiveSettings.sendParseEnabled(btn.getContext())) {
             Log.i("实况转MP4:功能已在设置里关闭,忽略点击");
@@ -1149,11 +1236,14 @@ public final class LiveSendHook {
         }
         Job j = job(path);
         j.checked = !j.checked;
-        if (j.checked && j.status != ST_READY && j.status != ST_PARSING) {
-            j.sent = false;
-            startParse(path, j);
-        }
-        if (!j.checked) {
+        if (j.checked) {
+            armedPaths.add(path);
+            if (j.status != ST_READY && j.status != ST_PARSING) {
+                j.sent = false;
+                startParse(path, j);
+            }
+        } else {
+            armedPaths.remove(path);
             // 用户主动取消:产物回收;被按住的发送结果也一并放行(按原图发出去)
             if (j.out != null) {
                 LiveComposer.discard(j.out);
@@ -1176,17 +1266,72 @@ public final class LiveSendHook {
     private static String selectedGridPath() {
         Object adapter = gridAdapterRef == null ? null : gridAdapterRef.get();
         java.util.List<Object> list = adapter == null ? null : adapterListOf(adapter);
-        if (list == null) return null;
+        if (list == null) {
+            Log.i("网格按钮: 数据表不可用 adapter="
+                    + (adapter == null ? "null" : adapter.getClass().getName()));
+            return null;
+        }
         String hit = null;
         int picked = 0;
+        int withPath = 0;
+        boolean anySelected = false;
         for (Object o : list) {
-            if (o == null || !isSelectedItem(o)) continue;
+            if (o == null) continue;
+            boolean sel = isSelectedItem(o);
+            if (sel) anySelected = true;
             String p = pathOfLoose(o);
             if (p == null) continue;
-            hit = p;
-            picked++;
+            withPath++;
+            if (sel) {
+                hit = p;
+                picked++;
+            }
         }
+        Log.i("网格按钮: 总数=" + list.size() + " 带路径=" + withPath
+                + " 勾选=" + picked + " anySelected=" + anySelected);
+        if (!anySelected && withPath > 0) dumpItemShape(list);
         return picked == 1 ? hit : null;
+    }
+
+    /** 选中态探测失败时,把数据项与 adapter 的字段结构 dump 一次用于校准。 */
+    private static final java.util.Set<String> dumpedShapes =
+            java.util.Collections.newSetFromMap(new java.util.concurrent.ConcurrentHashMap<String, Boolean>());
+
+    private static void dumpItemShape(java.util.List<Object> list) {
+        try {
+            Object sample = null;
+            for (Object o : list) {
+                if (o != null && pathOfLoose(o) != null) {
+                    sample = o;
+                    break;
+                }
+            }
+            if (sample == null) return;
+            String cls = sample.getClass().getName();
+            if (!dumpedShapes.add(cls)) return;
+            StringBuilder sb = new StringBuilder("数据项字段(").append(cls).append("): ");
+            for (Class<?> k = sample.getClass(); k != null && k != Object.class; k = k.getSuperclass()) {
+                for (Field f : k.getDeclaredFields()) {
+                    if (Modifier.isStatic(f.getModifiers())) continue;
+                    f.setAccessible(true);
+                    Object v;
+                    try {
+                        v = f.get(sample);
+                    } catch (Throwable ignored) {
+                        continue;
+                    }
+                    String vs = v == null ? "null" : (v instanceof String
+                            ? "'" + (v.toString().length() > 40 ? v.toString().substring(0, 40) + ".." : v) + "'"
+                            : String.valueOf(v));
+                    if (vs.length() > 60) vs = vs.substring(0, 60);
+                    sb.append(f.getName()).append(':').append(f.getType().getSimpleName())
+                            .append('=').append(vs).append("; ");
+                }
+            }
+            String s = sb.toString();
+            Log.i(s.length() > 1500 ? s.substring(0, 1500) : s);
+        } catch (Throwable ignored) {
+        }
     }
 
     private static void startParse(String path, Job j) {
@@ -1202,32 +1347,33 @@ public final class LiveSendHook {
             }
             Log.i("实况转MP4 结果 " + src + " -> status=" + jj.status
                     + (err == null ? "" : " err=" + err));
-            if (jj.autoSend) {
-                if (jj.pending != null) {
-                    MAIN.post(() -> releasePending(jj));
-                } else if (jj.deferred != null) {
-                    MAIN.post(() -> releaseDeferred(jj));
-                } else {
-                    // 结果还没回传(QQ 可能走了别的发送通道):等一下再看,超时就当原图已发出
-                    MAIN.postDelayed(() -> {
-                        if (!jj.autoSend || jj.pending != null || jj.deferred != null) return;
-                        Log.i("发送结果没有回传,按原图已发送处理 path=" + jj.path);
-                        jj.autoSend = false;
-                        jobs.remove(jj.path);
-                        if (jj.out != null) {
-                            LiveComposer.discard(jj.out);
-                            jj.out = null;
-                            jj.status = ST_NONE;
-                        }
-                    }, RESULT_WAIT_MS);
-                }
-            } else if (status == LiveComposer.OK && (jj.sent || !jj.checked)) {
-                // 解析完成时这张图已经发出去了(或用户已取消勾选),产物没有用处,立刻回收。
+            if (jj.pending != null) {
+                MAIN.post(() -> releasePending(jj));
+            } else if (jj.deferred != null) {
+                MAIN.post(() -> releaseDeferred(jj));
+            } else if (jj.autoSend) {
+                // 结果还没回传(QQ 可能走了别的发送通道):等一下再看,超时就当原图已发出
+                MAIN.postDelayed(() -> {
+                    if (!jj.autoSend || jj.pending != null || jj.deferred != null) return;
+                    Log.i("发送结果没有回传,按原图已发送处理 path=" + jj.path);
+                    jj.autoSend = false;
+                    jobs.remove(jj.path);
+                    if (jj.out != null) {
+                        LiveComposer.discard(jj.out);
+                        jj.out = null;
+                        jj.status = ST_NONE;
+                    }
+                }, RESULT_WAIT_MS);
+            } else if (status == LiveComposer.OK
+                    && (jj.sent || (!jj.checked && !armedPaths.contains(src)))) {
+                // 解析完成时这张图已经发出去了(或用户已取消且没点过按钮),产物没有用处,立刻回收。
+                // 自动排队的预热产物保留:用户稍后点按钮可以直接用。
                 LiveComposer.discard(out);
                 jj.status = ST_NONE;
                 jj.out = null;
             }
             if (src.equals(currentPath)) refreshButtons();
+            if (armedPaths.contains(src)) refreshButtons();
         });
     }
 
@@ -1275,8 +1421,13 @@ public final class LiveSendHook {
     }
 
     private static void style(TextView btn) {
-        Job j = currentPath == null ? null : jobs.get(currentPath);
-        boolean on = j != null && j.checked;
+        boolean on;
+        if (currentPath != null) {
+            Job j = jobs.get(currentPath);
+            on = j != null && j.checked;
+        } else {
+            on = !armedPaths.isEmpty();
+        }
         Context ctx = btn.getContext();
         if (on) {
             GradientDrawable bg = new GradientDrawable();
@@ -1301,27 +1452,48 @@ public final class LiveSendHook {
     }
 
     private static void label(TextView btn) {
-        Job j = currentPath == null ? null : jobs.get(currentPath);
-        if (j == null || !j.checked) {
+        if (currentPath != null) {
+            Job j = jobs.get(currentPath);
+            if (j != null && j.checked) {
+                btn.setText(stateText(j, 1, 1));
+                return;
+            }
             btn.setText("实况转MP4");
             return;
         }
+        // 网格态:按 armed 集合显示总体进度
+        if (armedPaths.isEmpty()) {
+            btn.setText("实况转MP4");
+            return;
+        }
+        int total = 0, ready = 0, parsing = 0, failed = 0;
+        for (String p : armedPaths) {
+            Job j = jobs.get(p);
+            if (j == null) continue;
+            total++;
+            if (j.status == ST_READY) ready++;
+            else if (j.status == ST_PARSING) parsing++;
+            else if (j.status == ST_FAILED || j.status == ST_NOT_LIVE) failed++;
+        }
+        if (total == 0) {
+            btn.setText("实况转MP4");
+        } else if (parsing > 0) {
+            btn.setText("转换中(" + Math.min(ready + 1, total) + "/" + total + ")");
+        } else if (failed > 0) {
+            btn.setText("部分失败(" + ready + "/" + total + ")");
+        } else {
+            btn.setText("全部转换完成");
+        }
+    }
+
+    /** 单张图的按钮文案。 */
+    private static String stateText(Job j, int k, int n) {
         switch (j.status) {
-            case ST_PARSING:
-                btn.setText("pass,转码中");
-                break;
-            case ST_READY:
-                btn.setText("已转码 ✓");
-                break;
-            case ST_NOT_LIVE:
-                btn.setText("非实况图");
-                break;
-            case ST_FAILED:
-                btn.setText("转码失败");
-                break;
-            default:
-                btn.setText("实况转MP4");
-                break;
+            case ST_PARSING: return "转换中(" + k + "/" + n + ")";
+            case ST_READY: return "全部转换完成";
+            case ST_NOT_LIVE: return "非实况图";
+            case ST_FAILED: return "转码失败";
+            default: return "实况转MP4";
         }
     }
 
@@ -1387,17 +1559,37 @@ public final class LiveSendHook {
     private static volatile long lastGridTry;
 
     /** 相册窗口里发现 RecyclerView 就挂它的 adapter(每类一次,带数据校验)。 */
+    private static final java.util.WeakHashMap<View, Integer> gridRetries = new java.util.WeakHashMap<>();
+
     private static void ensureGridAdapter(View root) {
         long now = System.currentTimeMillis();
         if (now - lastGridTry < 2000L || !(root instanceof ViewGroup)) return;
         lastGridTry = now;
         java.util.List<View> rvs = new java.util.ArrayList<>();
         collectRecyclerViews((ViewGroup) root, rvs);
+        boolean anyPending = false;
         for (View rv : rvs) {
             try {
                 Object adapter = XposedHelpers.callMethod(rv, "getAdapter");
-                if (adapter != null) hookGridAdapter(adapter);
+                if (adapter == null) continue;
+                if (hookGridAdapter(adapter)) {
+                    scanExistingCells(rv, adapter);
+                } else {
+                    anyPending = true;
+                }
             } catch (Throwable ignored) {
+            }
+        }
+        // 面板刚打开时数据表常常还是空的:安排延迟重试(面板静止后没有布局事件可依赖)
+        if (anyPending && root instanceof View) {
+            Integer n = gridRetries.get(root);
+            int tried = n == null ? 0 : n;
+            if (tried < 6) {
+                gridRetries.put(root, tried + 1);
+                ((View) root).postDelayed(() -> {
+                    lastGridTry = 0;
+                    ensureGridAdapter(root);
+                }, 1200L);
             }
         }
     }
@@ -1410,18 +1602,17 @@ public final class LiveSendHook {
         }
     }
 
-    /** 数据项带 getPath() 的 adapter 才是媒体网格;预览翻页器等其它列表排除,数据未到下轮再试。 */
-    private static void hookGridAdapter(Object adapter) {
+    /** 数据项带路径的 adapter 才是媒体网格;数据未到(面板刚开)返回 false 等重试。 */
+    private static boolean hookGridAdapter(Object adapter) {
         Class<?> c = adapter.getClass();
         java.util.List<Object> data = adapterListOf(adapter);
-        if (data == null) {
-            if (gridHooked.add(c)) {
-                Log.i("网格候选 adapter 排除(数据项无 getPath): " + c.getName());
+        if (data == null || data.isEmpty()) {
+            if (data == null && gridHooked.add(c)) {
+                Log.i("网格候选 adapter 排除(数据项无路径): " + c.getName());
             }
-            return;
+            return false;
         }
-        if (data.isEmpty()) return;
-        if (!gridHooked.add(c)) return;
+        if (!gridHooked.add(c)) return true;
         gridAdapterRef = new java.lang.ref.WeakReference<>(adapter);
         int n = 0;
         for (Class<?> k = c; k != null && k != Object.class && n == 0; k = k.getSuperclass()) {
@@ -1437,6 +1628,35 @@ public final class LiveSendHook {
             }
         }
         Log.i("相册网格 adapter 已挂: " + c.getName() + " onBind=" + n);
+        return true;
+    }
+
+    /** 钩子挂上后,已显示的格子不会重绑:按位置补一次角标与自动排队。 */
+    private static void scanExistingCells(View rv, Object adapter) {
+        if (!(rv instanceof ViewGroup)) return;
+        java.util.List<Object> data = adapterListOf(adapter);
+        if (data == null) return;
+        ViewGroup g = (ViewGroup) rv;
+        int done = 0;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View child = g.getChildAt(i);
+            try {
+                Object posObj = XposedHelpers.callMethod(rv, "getChildAdapterPosition", child);
+                if (!(posObj instanceof Integer)) continue;
+                int pos = (Integer) posObj;
+                if (pos < 0 || pos >= data.size()) continue;
+                Object item = data.get(pos);
+                String path = pathOfLoose(item);
+                bindCellBadge(child, path);
+                if (path != null) {
+                    if (isSelectedItem(item)) autoArmIfNeeded(path);
+                    else autoQueue(path);
+                    done++;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (done > 0) Log.i("网格补扫完成: " + done + " 格");
     }
 
     private static final XC_MethodHook BIND_HOOK = new XC_MethodHook() {
@@ -1464,9 +1684,14 @@ public final class LiveSendHook {
                     }
                 }
                 bindCellBadge(item, path);
-                // 勾选会触发重绑:此刻该格是选中态且已判定实况,立即后台合成
-                if (path != null && data != null && isSelectedItem(data)) {
-                    autoArmIfNeeded(path);
+                // 面板打开即自动排队转码(先后顺序,LiveComposer 单线程天然串行);
+                // 用户勾选/预览选中时再置 armed,发送时才替换成视频
+                if (path != null) {
+                    if (data != null && isSelectedItem(data)) {
+                        autoArmIfNeeded(path);
+                    } else {
+                        autoQueue(path);
+                    }
                 }
             } catch (Throwable t) {
                 Log.i("网格 onBind 处理失败: " + t);
