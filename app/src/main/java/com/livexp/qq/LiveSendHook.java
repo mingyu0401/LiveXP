@@ -87,6 +87,12 @@ public final class LiveSendHook {
         boolean checked;
         /** 这张图已经被"发送"处理过一次:之后再解析完的产物直接丢弃,不再留着占空间。 */
         boolean sent;
+        /** 发送被拦下等合成:合成完成后自动重触发 onSendClick。 */
+        boolean autoSend;
+        Object autoItem;
+        java.lang.ref.WeakReference<Object> autoTarget;
+        Method autoMethod;
+        Object[] autoArgs;
         LiveComposer.Out out;
     }
 
@@ -174,12 +180,123 @@ public final class LiveSendHook {
             protected void beforeHookedMethod(MethodHookParam param) {
                 try {
                     dumpItem();
-                    swapIfNeeded();
+                    swapIfNeeded(param);
                 } catch (Throwable t) {
                     Log.i("send swap failed, 原样发送: " + t);
                 }
             }
         });
+    }
+
+    /**
+     * 拦下这次发送,等合成完成后在主线程重调 onSendClick(此时已是 READY,正常走换引用)。
+     * 只拦"单图预览页"的发送:QQ 的发送列表必须恰好是这一条 LocalMediaInfo,
+     * 否则(相册多选、列表拿不到)不拦,按原图发,避免替用户发出意料外的组合。
+     */
+    private static boolean deferSend(XC_MethodHook.MethodHookParam param, Job j,
+                                     String path, Object item) {
+        if (j.autoSend) {
+            // 已经在等了:再次点发送只拦不发,不重复提示
+            param.setResult(null);
+            return true;
+        }
+        java.util.List<Object> list = sendListOf(param.thisObject);
+        if (list == null || list.size() != 1 || list.get(0) != item) {
+            Log.i("send: 发送列表不是单图(size=" + (list == null ? "?" : list.size())
+                    + "),不等合成,按原图发送");
+            return false;
+        }
+        param.setResult(null);
+        j.autoSend = true;
+        j.autoItem = item;
+        j.autoTarget = new java.lang.ref.WeakReference<>(param.thisObject);
+        j.autoMethod = param.method instanceof Method ? (Method) param.method : null;
+        j.autoArgs = param.args == null ? new Object[0] : param.args.clone();
+        Log.i("send: 解析未完成,已拦下发送,合成完成后自动发出 path=" + path);
+        toast("实况解析中…完成后自动发送");
+        return true;
+    }
+
+    /** 合成完成(含失败)后由解析回调在主线程调用:重触发被拦下的那次发送。 */
+    private static void autoSendNow(Job j, String path) {
+        Object target = j.autoTarget != null ? j.autoTarget.get() : null;
+        Method method = j.autoMethod;
+        Object item = j.autoItem;
+        Object[] args = j.autoArgs;
+        j.autoItem = null;
+        j.autoTarget = null;
+        j.autoMethod = null;
+        j.autoArgs = null;
+        if (target == null || method == null || item == null) {
+            cancelAutoSend(j, "预览页已销毁");
+            return;
+        }
+        // 等待期间用户滑到别的图,或把预览页关了:不能替他发
+        if (!path.equals(currentPath) || currentItem != item) {
+            cancelAutoSend(j, "预览项已变化");
+            return;
+        }
+        if (!anyBarAttached()) {
+            cancelAutoSend(j, "预览页已关闭");
+            return;
+        }
+        try {
+            Log.i("auto send: 合成结束(status=" + j.status + "),自动发送");
+            method.invoke(target, args);
+        } catch (Throwable t) {
+            Log.i("auto send failed: " + t);
+            cancelAutoSend(j, "自动发送调用失败");
+        }
+    }
+
+    /** 取消被拦下的自动发送:回收产物并复位状态(图没发出去,用户可自行再点发送)。 */
+    private static void cancelAutoSend(Job j, String why) {
+        Log.i("auto send 取消: " + why);
+        j.checked = false;
+        j.sent = false;
+        j.status = ST_NONE;
+        if (j.out != null) {
+            LiveComposer.discard(j.out);
+            j.out = null;
+        }
+        MAIN.post(LiveSendHook::refreshButtons);
+    }
+
+    /** 底栏还挂在窗口上,说明单图预览页还活着。 */
+    private static boolean anyBarAttached() {
+        synchronized (buttons) {
+            for (View bar : buttons.keySet()) {
+                if (bar != null && bar.isAttachedToWindow()) return true;
+            }
+        }
+        return false;
+    }
+
+    /** onSendClick 实际发送的 List<LocalMediaInfo>(getPhotoCommonData().h()),拿不到返回 null。 */
+    private static java.util.List<Object> sendListOf(Object customization) {
+        try {
+            Object pc = XposedHelpers.callMethod(customization, "getPhotoCommonData");
+            if (pc == null) return null;
+            Object list = XposedHelpers.callMethod(pc, "h");
+            return list instanceof java.util.List ? (java.util.List<Object>) list : null;
+        } catch (Throwable t) {
+            Log.i("send list unavailable: " + t);
+            return null;
+        }
+    }
+
+    private static void toast(String msg) {
+        try {
+            android.content.Context ctx = HookEntry.appCtx;
+            if (ctx == null) return;
+            MAIN.post(() -> {
+                try {
+                    android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show();
+                } catch (Throwable ignored) {
+                }
+            });
+        } catch (Throwable ignored) {
+        }
     }
 
     /** 只挂该类自己声明的方法:基类已经挂过,重复注册会撞 LSPosed 的回调数量上限。 */
@@ -443,6 +560,14 @@ public final class LiveSendHook {
             j.out = null;
             j.status = ST_NONE;
         }
+        if (!j.checked) {
+            // 用户主动取消:被拦下等合成的自动发送也一并放弃(原图没发,用户可再点发送)
+            j.autoSend = false;
+            j.autoItem = null;
+            j.autoTarget = null;
+            j.autoMethod = null;
+            j.autoArgs = null;
+        }
         style(btn);
         label(btn);
     }
@@ -452,12 +577,7 @@ public final class LiveSendHook {
         Log.i("解析实况启动: " + path);
         LiveComposer.composeAsync(path, (status, src, out, err) -> {
             Job jj = job(src);
-            if (status == LiveComposer.OK && (jj.sent || !jj.checked)) {
-                // 解析完成时这张图已经发出去了(或用户已取消勾选),产物没有用处,立刻回收。
-                LiveComposer.discard(out);
-                jj.status = ST_NONE;
-                jj.out = null;
-            } else if (status == LiveComposer.OK) {
+            if (status == LiveComposer.OK) {
                 jj.status = ST_READY;
                 jj.out = out;
             } else {
@@ -465,6 +585,16 @@ public final class LiveSendHook {
             }
             Log.i("解析实况结果 " + src + " -> status=" + jj.status
                     + (err == null ? "" : " err=" + err));
+            if (jj.autoSend) {
+                // 有被拦下的发送在等:主线程重调 onSendClick,READY 走换视频,失败走原图回退
+                jj.autoSend = false;
+                MAIN.post(() -> autoSendNow(jj, src));
+            } else if (status == LiveComposer.OK && (jj.sent || !jj.checked)) {
+                // 解析完成时这张图已经发出去了(或用户已取消勾选),产物没有用处,立刻回收。
+                LiveComposer.discard(out);
+                jj.status = ST_NONE;
+                jj.out = null;
+            }
             if (src.equals(currentPath)) refreshButtons();
         });
     }
@@ -496,6 +626,11 @@ public final class LiveSendHook {
                 }
                 for (Job j : jobs.values()) {
                     j.checked = false;
+                    j.autoSend = false;
+                    j.autoItem = null;
+                    j.autoTarget = null;
+                    j.autoMethod = null;
+                    j.autoArgs = null;
                     if (j.status != ST_PARSING && j.out != null) {
                         LiveComposer.discard(j.out);
                         j.out = null;
@@ -562,7 +697,7 @@ public final class LiveSendHook {
 
     // ------------------------------------------------------------ 发送替换
 
-    private static void swapIfNeeded() {
+    private static void swapIfNeeded(XC_MethodHook.MethodHookParam param) {
         String path = currentPath;
         Object item = currentItem;
         if (path == null || item == null) {
@@ -572,6 +707,10 @@ public final class LiveSendHook {
         Job j = jobs.get(path);
         if (j == null) return;
         j.sent = true;
+        // 勾了解析且还在合成:拦下这次发送,等合成完自动重发,不能把实况原图直接发出去。
+        if (j.checked && j.status == ST_PARSING && deferSend(param, j, path, item)) {
+            return;
+        }
         if (!j.checked || j.status != ST_READY || j.out == null
                 || j.out.file == null || !j.out.file.isFile()) {
             if (j.out != null) {
