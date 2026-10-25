@@ -514,6 +514,7 @@ public final class ModuleAboutPage {
         sb.append("<div class='sec'>")
                 .append("<div class='secH'>致谢和开源使用说明")
                 .append(appMode ? "" : "<span class='tag'>可选</span>")
+                .append("</div>")
                 .append("<div class='secTip'>LiveXP 是站在别人肩膀上的一次尝试。下面这些人和项目让作者少走了很多弯路,")
                 .append("点按条目可复制地址(独立 App 内会同时打开浏览器)。</div>")
                 .append(creditRow("QA 模块", "提供了实现思路,LiveXP 的不少做法参考自它。",
