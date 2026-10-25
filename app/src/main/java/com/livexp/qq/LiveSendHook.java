@@ -11,6 +11,7 @@ import android.os.Parcelable;
 import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.widget.TextView;
 
 import java.io.File;
@@ -141,8 +142,39 @@ public final class LiveSendHook {
         hookSelection(preview);
         hookSend(preview);
         hookResultDelivery();
+        hookAlbumResume();
         LiveSendMarks.loadAsync();
         Log.i("send hook installed on " + preview.getName());
+    }
+
+    /**
+     * 相册入口自启:QQ NT 是单 Activity 架构(SplashActivity),半屏相册面板/全屏相册/
+     * 发送预览页都是它内部的浮层,不走独立 Activity 也不触发 getBottomView(实测零日志)。
+     * 所以在所有 Activity resume 时把布局看门狗装到 DecorView 上:面板打开引发布局,
+     * ensureButton/ensureGridAdapter 即可发现网格与预览底栏并补挂。
+     */
+    private static void hookAlbumResume() {
+        try {
+            XposedBridge.hookAllMethods(android.app.Instrumentation.class,
+                    "callActivityOnResume", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            Object a = param.args != null && param.args.length > 0 ? param.args[0] : null;
+                            if (!(a instanceof android.app.Activity)) return;
+                            android.app.Activity act = (android.app.Activity) a;
+                            if (act.isFinishing()) return;
+                            String name = act.getClass().getName();
+                            if (!seenHosts.add("resume:" + name)) return;
+                            Log.i("看门狗就位: " + name);
+                            ViewGroup decor = (ViewGroup) act.getWindow().getDecorView();
+                            watchRoot(decor);
+                            decor.postDelayed(() -> ensureButton(decor), 600);
+                        }
+                    });
+            Log.i("相册 resume 钩子已挂");
+        } catch (Throwable t) {
+            Log.i("hook album resume failed: " + t);
+        }
     }
 
     // ------------------------------------------------------------ hook
@@ -176,6 +208,9 @@ public final class LiveSendHook {
         if (c == null || !hookedClasses.add(c)) return;
         if (PREVIEW_CLASS.equals(c.getName())) return;
         Log.i("预览实现类: " + c.getName() + " 方法=" + sendish(c));
+        // 子类可能连 getBottomView 也覆写(Xposed 只挂到声明处,虚分发走子类时基类钩子拦不到),
+        // 一并补挂;子类没声明时 hookAllMethods 找不到方法,无副作用
+        hookBottom(c);
         hookSelection(c);
         hookSend(c);
     }
@@ -203,8 +238,39 @@ public final class LiveSendHook {
                 currentPath = pathOf(info);
                 refreshButtons();
                 refreshPreviewBadge(param.thisObject);
+                autoArmIfNeeded(currentPath);
             }
         });
+    }
+
+    /**
+     * 选中(点开预览)已判定为实况的图片:自动勾上转码并立刻后台合成,
+     * 用户到发送时产物通常已就绪。总开关「实况转MP4」关闭时不做。
+     */
+    private static void autoArmIfNeeded(String path) {
+        if (path == null) return;
+        android.content.Context ctx = HookEntry.appCtx;
+        if (ctx == null || !LiveSettings.sendParseEnabled(ctx)) return;
+        Boolean live = liveVerdict.get(path);
+        if (live == null) {
+            IO.execute(() -> {
+                boolean l = LivePhotoDetector.isLiveFile(path);
+                liveVerdict.put(path, l);
+                if (l) MAIN.post(() -> autoArmNow(path));
+            });
+            return;
+        }
+        if (live) autoArmNow(path);
+    }
+
+    private static void autoArmNow(String path) {
+        Job j = job(path);
+        if (j.checked || j.status == ST_PARSING || j.status == ST_READY) return;
+        j.checked = true;
+        j.sent = false;
+        Log.i("选中实况图,自动开始转码: " + path);
+        startParse(path, j);
+        refreshButtons();
     }
 
     private static void hookSend(Class<?> owner) {
@@ -296,20 +362,37 @@ public final class LiveSendHook {
         jobs.remove(j.path);
     }
 
-    /** 结果里的媒体列表里有没有我们等着的那张图。 */
+    /**
+     * 结果里的媒体列表里有没有我们等着的那张图。
+     * 网格发送不走 onSendClick(没有 autoSend 标记),所以只要这张图已合成完毕(READY),
+     * 结果回传里出现它的原图路径就顺手换成视频副本。
+     */
     private static Job matchPendingJob(Intent data) {
         List<Object> list = resultList(data);
         if (list == null) return null;
+        Job fallback = null;
         for (Job j : jobs.values()) {
-            if (!j.autoSend) continue;
-            for (Object o : list) {
-                if (o == null) continue;
-                if (o == j.autoItem) return j;
-                String p = pathOf(o);
-                if (p != null && p.equals(j.path)) return j;
+            if (j.autoSend) {
+                for (Object o : list) {
+                    if (o == null) continue;
+                    if (o == j.autoItem) return j;
+                    String p = pathOf(o);
+                    if (p != null && p.equals(j.path)) return j;
+                }
+                continue;
+            }
+            if (fallback == null && j.status == ST_READY && j.out != null) {
+                for (Object o : list) {
+                    if (o == null) continue;
+                    String p = pathOf(o);
+                    if (p != null && p.equals(j.path)) {
+                        fallback = j;
+                        break;
+                    }
+                }
             }
         }
-        return null;
+        return fallback;
     }
 
     /** 把结果里的媒体项换成合成视频的副本,相册里的原图对象不动。 */
@@ -797,14 +880,23 @@ public final class LiveSendHook {
 
     private static volatile long lastEnsure;
 
+    /** 窗口级"没有预览底栏"负缓存:聊天页常驻但永远没有原图/编辑,别每次布局都全树扫。 */
+    private static final java.util.WeakHashMap<View, Long> noAnchorUntil = new java.util.WeakHashMap<>();
+
     private static void ensureButton(View root) {
         if (root == null) return;
         try {
+            ensureGridAdapter(root);
+            Long until = noAnchorUntil.get(root);
+            long now = System.currentTimeMillis();
+            if (until != null && now < until) return;
             TextView anchor = findPreviewAnchor(root);
             if (anchor == null) {
                 PreviewBadge.hide(root);
+                noAnchorUntil.put(root, now + 1500L);
                 return;
             }
+            noAnchorUntil.remove(root);
             TextView existing = root.findViewById(BTN_ID);
             if (existing != null) {
                 place(existing, anchor, (ViewGroup) anchor.getParent());
@@ -817,16 +909,12 @@ public final class LiveSendHook {
     }
 
     /**
-     * 只在"单图预览页底栏"里找锚点:必须同时有"原图/编辑"和"发送"。
-     * 相册网格底栏(相册|编辑|原图|发送)也满足前一条,但没有选中单张图,
-     * 挂上去只会解析上一张、且占着网格底栏,所以按"相册"文案排除。
-     * 半屏预览与网格共用一个面板时,root 里可能同时有两套"原图"(网格在前),
-     * 被排除的那个记下来,继续找下一个候选;命中过的锚点缓存起来,
-     * 布局风暴(左右滑动)时只做"还活着"的廉价校验,不再全树扫描。
+     * 在"有原图/编辑 + 发送"的底栏里找锚点。QQ NT 半屏相册面板/全屏相册的网格底栏
+     * ([相册][编辑][原图][发送])就是要挂按钮的地方,不再按"相册"文案排除(实测误杀)。
+     * 命中过的锚点缓存起来,布局风暴(左右滑动)时只做"还活着"的廉价校验,不再全树扫描。
      */
     private static java.lang.ref.WeakReference<TextView> cachedAnchor;
     private static java.lang.ref.WeakReference<TextView> cachedSend;
-    private static java.lang.ref.WeakReference<TextView> rejectedAnchor;
 
     private static TextView findPreviewAnchor(View root) {
         TextView hit = peek(cachedAnchor);
@@ -840,36 +928,12 @@ public final class LiveSendHook {
             }
             return null;
         }
-        TextView anchor = null;
-        ViewGroup bar = null;
-        TextView skip = peek(rejectedAnchor);
-        for (int i = 0; i < 3; i++) {
-            TextView cand = findTextExcept(root, "原图", skip);
-            if (cand == null) break;
-            ViewGroup b = cand.getParent() instanceof ViewGroup
-                    ? (ViewGroup) cand.getParent() : null;
-            if (b == null || findText(b, "相册") != null) {
-                if (b != null && skip != cand) Log.i("跳过网格底栏锚点: " + textsOf(b));
-                skip = cand;
-                rejectedAnchor = new java.lang.ref.WeakReference<>(cand);
-                continue;
-            }
-            anchor = cand;
-            bar = b;
-            break;
-        }
-        if (anchor == null) {
-            TextView cand = findText(root, "编辑");
-            if (cand != null) {
-                ViewGroup b = cand.getParent() instanceof ViewGroup
-                        ? (ViewGroup) cand.getParent() : null;
-                if (b != null && findText(b, "相册") == null) {
-                    anchor = cand;
-                    bar = b;
-                }
-            }
-        }
-        if (anchor == null || bar == null) return null;
+        TextView anchor = findText(root, "原图");
+        if (anchor == null) anchor = findText(root, "编辑");
+        if (anchor == null) return null;
+        ViewGroup bar = anchor.getParent() instanceof ViewGroup
+                ? (ViewGroup) anchor.getParent() : null;
+        if (bar == null) return null;
         TextView send = findSendText(bar);
         if (send == null) send = findSendText(root);
         if (send == null) return null;
@@ -884,23 +948,6 @@ public final class LiveSendHook {
 
     private static boolean alive(View v) {
         return v.isAttachedToWindow() && v.isShown() && v.getWidth() > 0;
-    }
-
-    /** 与 {@link #findText} 相同,但跳过指定实例(被排除过的网格底栏锚点)。 */
-    private static TextView findTextExcept(View root, String want, TextView skip) {
-        if (root == skip) return null;
-        if (root instanceof TextView && want.equals(((TextView) root).getText())
-                && root.isShown() && root.getWidth() > 0) {
-            return (TextView) root;
-        }
-        if (root instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) root;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                TextView hit = findTextExcept(g.getChildAt(i), want, skip);
-                if (hit != null) return hit;
-            }
-        }
-        return null;
     }
 
     /** 底栏(含子树)的全部文字,诊断锚点判定用。 */
@@ -1088,8 +1135,13 @@ public final class LiveSendHook {
     private static void toggle(TextView btn) {
         String path = currentPath;
         if (path == null) {
-            Log.i("实况转MP4:当前没有选中图片,忽略点击");
-            return;
+            // 网格态(半屏/全屏相册面板):按当前勾选的那张图处理
+            String picked = selectedGridPath();
+            if (picked == null) {
+                toast("先勾选一张图片(一次一张)");
+                return;
+            }
+            path = picked;
         }
         if (!LiveSettings.sendParseEnabled(btn.getContext())) {
             Log.i("实况转MP4:功能已在设置里关闭,忽略点击");
@@ -1115,6 +1167,26 @@ public final class LiveSendHook {
         }
         style(btn);
         label(btn);
+    }
+
+    /** 最近挂上网格角标钩子的 adapter(弱引用,防面板关闭后持旧实例)。 */
+    private static java.lang.ref.WeakReference<Object> gridAdapterRef;
+
+    /** 网格里当前被勾选的那张图(恰好一张才返回路径)。 */
+    private static String selectedGridPath() {
+        Object adapter = gridAdapterRef == null ? null : gridAdapterRef.get();
+        java.util.List<Object> list = adapter == null ? null : adapterListOf(adapter);
+        if (list == null) return null;
+        String hit = null;
+        int picked = 0;
+        for (Object o : list) {
+            if (o == null || !isSelectedItem(o)) continue;
+            String p = pathOfLoose(o);
+            if (p == null) continue;
+            hit = p;
+            picked++;
+        }
+        return picked == 1 ? hit : null;
     }
 
     private static void startParse(String path, Job j) {
@@ -1299,6 +1371,292 @@ public final class LiveSendHook {
         }
     }
 
+    // ------------------------------------------------------------ 相册网格实况角标
+
+    /**
+     * 相册(半屏/全屏通用)网格缩略图左上角的实况角标:
+     * 挂网格 adapter 的 onBindViewHolder,按条目文件路径做文件级判定(结果按路径缓存),
+     * 判定是实况就在缩略图左上角贴点环角标。滚动时增量判定,不动已有数据。
+     */
+    private static final int GRID_BADGE_ID = 0x7e0b1e22;
+    private static final Map<View, String> cellPaths = new WeakHashMap<>();
+    private static final java.util.Set<Class<?>> gridHooked =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<Class<?>, Boolean>());
+    private static final Map<Class<?>, Field> holderPathFields = new WeakHashMap<>();
+    private static final Map<Object, java.util.List<Object>> adapterLists = new WeakHashMap<>();
+    private static volatile long lastGridTry;
+
+    /** 相册窗口里发现 RecyclerView 就挂它的 adapter(每类一次,带数据校验)。 */
+    private static void ensureGridAdapter(View root) {
+        long now = System.currentTimeMillis();
+        if (now - lastGridTry < 2000L || !(root instanceof ViewGroup)) return;
+        lastGridTry = now;
+        java.util.List<View> rvs = new java.util.ArrayList<>();
+        collectRecyclerViews((ViewGroup) root, rvs);
+        for (View rv : rvs) {
+            try {
+                Object adapter = XposedHelpers.callMethod(rv, "getAdapter");
+                if (adapter != null) hookGridAdapter(adapter);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private static void collectRecyclerViews(View v, java.util.List<View> out) {
+        if ("androidx.recyclerview.widget.RecyclerView".equals(v.getClass().getName())) out.add(v);
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) collectRecyclerViews(g.getChildAt(i), out);
+        }
+    }
+
+    /** 数据项带 getPath() 的 adapter 才是媒体网格;预览翻页器等其它列表排除,数据未到下轮再试。 */
+    private static void hookGridAdapter(Object adapter) {
+        Class<?> c = adapter.getClass();
+        java.util.List<Object> data = adapterListOf(adapter);
+        if (data == null) {
+            if (gridHooked.add(c)) {
+                Log.i("网格候选 adapter 排除(数据项无 getPath): " + c.getName());
+            }
+            return;
+        }
+        if (data.isEmpty()) return;
+        if (!gridHooked.add(c)) return;
+        gridAdapterRef = new java.lang.ref.WeakReference<>(adapter);
+        int n = 0;
+        for (Class<?> k = c; k != null && k != Object.class && n == 0; k = k.getSuperclass()) {
+            for (Method m : k.getDeclaredMethods()) {
+                if (!m.getName().equals("onBindViewHolder")) continue;
+                if (!hookedMethods.add(m)) continue;
+                try {
+                    XposedBridge.hookMethod(m, BIND_HOOK);
+                    n++;
+                } catch (Throwable t) {
+                    Log.i("网格 onBind 挂载失败: " + t);
+                }
+            }
+        }
+        Log.i("相册网格 adapter 已挂: " + c.getName() + " onBind=" + n);
+    }
+
+    private static final XC_MethodHook BIND_HOOK = new XC_MethodHook() {
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            try {
+                if (param.args == null || param.args.length == 0) return;
+                Object holder = param.args[0];
+                if (holder == null) return;
+                View item = (View) XposedHelpers.getObjectField(holder, "itemView");
+                Object data = null;
+                String path = pathFromHolder(holder);
+                if (path == null) {
+                    Integer pos = null;
+                    for (Object a : param.args) {
+                        if (a instanceof Integer) {
+                            pos = (Integer) a;
+                            break;
+                        }
+                    }
+                    java.util.List<Object> list = adapterListOf(param.thisObject);
+                    if (pos != null && list != null && pos >= 0 && pos < list.size()) {
+                        data = list.get(pos);
+                        path = pathOfLoose(data);
+                    }
+                }
+                bindCellBadge(item, path);
+                // 勾选会触发重绑:此刻该格是选中态且已判定实况,立即后台合成
+                if (path != null && data != null && isSelectedItem(data)) {
+                    autoArmIfNeeded(path);
+                }
+            } catch (Throwable t) {
+                Log.i("网格 onBind 处理失败: " + t);
+            }
+        }
+    };
+
+    /** LocalMediaInfo 的选中态:方法名/字段名按常见形态试,全失败当未选中。 */
+    private static boolean isSelectedItem(Object item) {
+        for (String g : new String[]{"isIsSelected", "getIsSelected", "isSelected",
+                "isChecked", "getChecked", "isCheck"}) {
+            try {
+                Object r = XposedHelpers.callMethod(item, g);
+                if (r instanceof Boolean) return (Boolean) r;
+            } catch (Throwable ignored) {
+            }
+        }
+        for (Class<?> c = item.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Field f : c.getDeclaredFields()) {
+                if (f.getType() != boolean.class && f.getType() != Boolean.class) continue;
+                String n = f.getName().toLowerCase(java.util.Locale.US);
+                if (!n.contains("select") && !n.contains("check")) continue;
+                f.setAccessible(true);
+                try {
+                    Object v = f.get(item);
+                    if (v instanceof Boolean) return (Boolean) v;
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return false;
+    }
+
+    /** ViewHolder 字段里找媒体对象(带 getPath),按 VH 类缓存字段。 */
+    private static String pathFromHolder(Object holder) {
+        Class<?> c = holder.getClass();
+        Field f;
+        synchronized (holderPathFields) {
+            f = holderPathFields.get(c);
+        }
+        if (f != null) {
+            try {
+                return pathOfLoose(f.get(holder));
+            } catch (Throwable ignored) {
+            }
+        }
+        for (Class<?> k = c; k != null && k != Object.class; k = k.getSuperclass()) {
+            for (Field cand : k.getDeclaredFields()) {
+                if (Modifier.isStatic(cand.getModifiers())) continue;
+                cand.setAccessible(true);
+                Object v;
+                try {
+                    v = cand.get(holder);
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                if (v == null) continue;
+                String p = pathOfLoose(v);
+                if (p != null) {
+                    synchronized (holderPathFields) {
+                        holderPathFields.put(c, cand);
+                    }
+                    return p;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** adapter 里的媒体数据表(List 字段且首元素带 getPath),按 adapter 实例缓存。 */
+    @SuppressWarnings("unchecked")
+    private static java.util.List<Object> adapterListOf(Object adapter) {
+        synchronized (adapterLists) {
+            java.util.List<Object> cached = adapterLists.get(adapter);
+            if (cached != null && !cached.isEmpty()) return cached;
+        }
+        java.util.List<Object> hit = adapterListOfInner(adapter, 0);
+        if (hit != null) {
+            synchronized (adapterLists) {
+                adapterLists.put(adapter, hit);
+            }
+        }
+        return hit;
+    }
+
+    /** 递归找数据表;ConcatAdapter 这类"装 adapter 的 adapter"要下钻一层。 */
+    @SuppressWarnings("unchecked")
+    private static java.util.List<Object> adapterListOfInner(Object adapter, int depth) {
+        if (adapter == null || depth > 2) return null;
+        for (Class<?> k = adapter.getClass(); k != null && k != Object.class; k = k.getSuperclass()) {
+            for (Field f : k.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers()) || !List.class.isAssignableFrom(f.getType())) continue;
+                f.setAccessible(true);
+                Object v;
+                try {
+                    v = f.get(adapter);
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                if (!(v instanceof List) || ((List<?>) v).isEmpty()) continue;
+                List<?> l = (List<?>) v;
+                Object e0 = l.get(0);
+                if (e0 == null) continue;
+                if (pathOfLoose(e0) != null) return (java.util.List<Object>) l;
+                // 元素还是 adapter(ConcatAdapter 场景):下钻
+                if (depth < 2 && isRecyclerAdapter(e0)) {
+                    for (Object inner : l) {
+                        java.util.List<Object> hit = adapterListOfInner(inner, depth + 1);
+                        if (hit != null) return hit;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean isRecyclerAdapter(Object o) {
+        for (Class<?> c = o.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            if ("androidx.recyclerview.widget.RecyclerView$Adapter".equals(c.getName())) return true;
+        }
+        return false;
+    }
+
+    private static void bindCellBadge(final View item, String path) {
+        if (!(item instanceof ViewGroup)) return;
+        if (path == null || isVideoPath(path)) {
+            cellPaths.remove(item);
+            setCellBadge(item, false);
+            return;
+        }
+        cellPaths.put(item, path);
+        Boolean live = liveVerdict.get(path);
+        if (live != null) {
+            setCellBadge(item, live);
+            return;
+        }
+        setCellBadge(item, false);
+        final String p = path;
+        IO.execute(() -> {
+            boolean l = LivePhotoDetector.isLiveFile(p);
+            liveVerdict.put(p, l);
+            MAIN.post(() -> {
+                if (p.equals(cellPaths.get(item))) setCellBadge(item, l);
+            });
+        });
+    }
+
+    private static boolean isVideoPath(String p) {
+        String s = p.toLowerCase(java.util.Locale.US);
+        return s.endsWith(".mp4") || s.endsWith(".mov") || s.endsWith(".3gp")
+                || s.endsWith(".avi") || s.endsWith(".mkv") || s.endsWith(".webm");
+    }
+
+    private static void setCellBadge(View itemView, boolean on) {
+        ViewGroup item = itemView instanceof ViewGroup ? (ViewGroup) itemView : null;
+        if (item == null) return;
+        View badge = item.findViewById(GRID_BADGE_ID);
+        if (!on) {
+            if (badge != null && badge.getParent() instanceof ViewGroup) {
+                ((ViewGroup) badge.getParent()).removeView(badge);
+            }
+            return;
+        }
+        if (badge != null) return;
+        Context ctx = item.getContext();
+        FrameLayout b = new FrameLayout(ctx);
+        b.setId(GRID_BADGE_ID);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0x73000000);
+        bg.setCornerRadius(dp(ctx, 7));
+        b.setBackground(bg);
+        b.addView(new LiveMarkView(ctx, 0.78f), new FrameLayout.LayoutParams(
+                dp(ctx, 14), dp(ctx, 14), android.view.Gravity.CENTER));
+        int size = dp(ctx, 20);
+        if (item instanceof FrameLayout) {
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(size, size,
+                    android.view.Gravity.TOP | android.view.Gravity.START);
+            lp.leftMargin = dp(ctx, 4);
+            lp.topMargin = dp(ctx, 4);
+            item.addView(b, lp);
+        } else {
+            item.addView(b, new ViewGroup.LayoutParams(size, size));
+            final float pad = dp(ctx, 4);
+            b.post(() -> {
+                b.setTranslationX(pad);
+                b.setTranslationY(pad);
+            });
+        }
+    }
+
     // ------------------------------------------------------------ 杂项
 
     /** 发送完成后延迟回收;期间若用户又取消/重发,重复 discard 也只是幂等删文件。 */
@@ -1371,6 +1729,33 @@ public final class LiveSendHook {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    /**
+     * 宽松路径提取:相册面板的数据项(PhotoPanelAdapter 的元素)没有 getPath() 时,
+     * 反射找值看起来像本机文件路径的 String 字段。仅用于网格角标/选中的判读,不参与发送替换。
+     */
+    private static String pathOfLoose(Object info) {
+        String hit = pathOf(info);
+        if (hit != null) return hit;
+        if (info == null) return null;
+        for (Class<?> c = info.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Field f : c.getDeclaredFields()) {
+                if (f.getType() != String.class || Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                String v;
+                try {
+                    v = (String) f.get(info);
+                } catch (Throwable ignored) {
+                    continue;
+                }
+                if (v == null || v.isEmpty() || v.length() > 200) continue;
+                if (v.startsWith("/storage/") || v.startsWith("/data/user/0/")) {
+                    return v;
+                }
+            }
+        }
+        return null;
     }
 
     private static int dp(Context ctx, float v) {
