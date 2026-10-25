@@ -1570,7 +1570,9 @@ public final class LiveVideoPlayer {
         final Activity owner = activity;
         EXEC.execute(() -> {
             try {
-                final File vf = extract(src);
+                final File raw = extract(src);
+                // 合成「3s 静态图 + 实况视频」的规范 MP4 再播;失败回退原始切片
+                final File vf = composedOrRaw(src, raw);
                 Log.i("video ready: " + vf.getPath() + " " + (vf.length() / 1024) + "KB");
                 MAIN.post(() -> {
                     // 提取期间可能已经退出查看器/翻到别的页:旧视频不能叠到新页面上
@@ -1589,6 +1591,31 @@ public final class LiveVideoPlayer {
                 });
             }
         });
+    }
+
+    /**
+     * 播放用合成产物:与「实况转MP4」同一条 LiveComposer 管线(动态段先播 + 收尾 3 秒定格,
+     * 音频按原生时间轴 remux,不平移到定格段)。直接播原始切片在部分机型上卡顿/音画不同步,
+     * 合成产物是规范 CFR MP4。失败回退原始切片;按源文件 mtime 缓存复用。
+     */
+    private static File composedOrRaw(String src, File raw) {
+        File in = new File(src);
+        File out = new File(CACHE_DIR,
+                Integer.toHexString(src.hashCode()) + "_" + in.lastModified() + ".cmp.mp4");
+        if (out.isFile() && out.length() > 4096) return out;
+        try {
+            LiveComposer.Out o = new LiveComposer.Out();
+            LiveComposer.composeTo(src, o, out);
+            if (out.isFile() && out.length() > 4096) {
+                Log.i("playback composed: " + out.getName() + " " + (out.length() / 1024)
+                        + "KB dur=" + (o.durationUs / 1000) + "ms audio=" + o.hasAudio);
+                return out;
+            }
+        } catch (Throwable t) {
+            Log.i("playback compose failed, fallback raw: " + t);
+            out.delete();
+        }
+        return raw;
     }
 
     private static void startOverlay(Activity activity, File vf) {
@@ -1667,12 +1694,30 @@ public final class LiveVideoPlayer {
             int headLen = (int) Math.min(size, 128 * 1024);
             byte[] head = new byte[headLen];
             raf.readFully(head);
-            Matcher m = Pattern.compile("MicroVideoOffset=\"(\\d+)\"")
-                    .matcher(new String(head, StandardCharsets.ISO_8859_1));
+            String headStr = new String(head, StandardCharsets.ISO_8859_1);
+            // 1) 旧版 XMP MicroVideoOffset:视频在文件尾,起点=文件大小-offset
+            Matcher m = Pattern.compile("MicroVideoOffset=\"(\\d+)\"").matcher(headStr);
             if (m.find()) start = size - Long.parseLong(m.group(1));
-        }
-        if (start <= 0) {
-            try (RandomAccessFile raf = new RandomAccessFile(in, "r")) {
+            // 2) 新版 XMP Container:Directory:video/mp4 条目声明视频长度(OPPO/Google 风格),
+            //    起点=文件大小-Length。JPEG 数据里可能恰好出现假 ftyp 字样,优先按声明精确定位
+            if (start <= 0) {
+                Matcher item = Pattern.compile("<Container:Item\\b[^>]*>").matcher(headStr);
+                while (item.find()) {
+                    String tag = item.group();
+                    if (!tag.contains("video/mp4")) continue;
+                    Matcher len = Pattern.compile("Item:Length=\"(\\d+)\"").matcher(tag);
+                    if (!len.find()) continue;
+                    long vlen = Long.parseLong(len.group(1));
+                    long cand = size - vlen;
+                    if (vlen > 1024 && cand > 0 && isMp4BoxStart(raf, cand)) {
+                        start = cand;
+                        Log.i("video start from XMP container dir: " + start + " len=" + vlen);
+                        break;
+                    }
+                }
+            }
+            // 3) 三星尾部 MotionPhoto_Data 标记
+            if (start <= 0) {
                 long tailLen = Math.min(size, 4096);
                 byte[] tail = new byte[(int) tailLen];
                 raf.seek(size - tailLen);
@@ -1719,38 +1764,71 @@ public final class LiveVideoPlayer {
         return out;
     }
 
-    /** 找第一个合法的 ftyp box(前 4 字节是 box size 且不越界),返回 box 起始偏移。 */
+    /**
+     * 找第一个合法的 ftyp box(前 4 字节是 box size 且不越界),返回 box 起始偏移。
+     * 跨 1MB 块扫描时 buf 前部是上一块尾部,返回偏移必须按 buf[0] 的真实文件位置换算,
+     * 旧实现按本轮 seek 位置算,命中在后续块时会偏大 8 字节(靠 -8 校准兜回,但不可靠)。
+     * JPEG 数据里可能存在假 ftyp 字样,除 box size 校验外还要求下一层 box 头也合法。
+     */
     private static long findFtypStart(File in, long size) throws Exception {
-        byte[] needle = "ftyp".getBytes(StandardCharsets.ISO_8859_1);
         long chunk = 1024 * 1024;
         byte[] buf = new byte[(int) chunk];
-        long filePos = 0;
-        int carry = 0;
+        // base = buf[0] 对应的文件偏移
+        long base = 0;
+        int filled = 0;
         try (RandomAccessFile raf = new RandomAccessFile(in, "r")) {
-            while (filePos < size) {
-                raf.seek(filePos);
-                int n = raf.read(buf, carry, (int) chunk - carry);
+            while (base + filled < size) {
+                raf.seek(base + filled);
+                int n = raf.read(buf, filled, (int) chunk - filled);
                 if (n <= 0) break;
-                int total = carry + n;
-                for (int i = 0; i + 8 <= total; i++) {
-                    if (buf[i] == needle[0] && buf[i + 1] == needle[1]
-                            && buf[i + 2] == needle[2] && buf[i + 3] == needle[3]) {
-                        int boxStart = i - 4;
-                        if (boxStart >= 0) {
-                            long boxSize = ((buf[boxStart] & 0xFFL) << 24) | ((buf[boxStart + 1] & 0xFFL) << 16)
-                                    | ((buf[boxStart + 2] & 0xFFL) << 8) | (buf[boxStart + 3] & 0xFFL);
-                            if (boxSize >= 8) {
-                                return filePos + boxStart;
-                            }
-                        }
-                    }
+                int total = filled + n;
+                for (int i = 4; i + 4 <= total; i++) {
+                    if (buf[i] != 'f' || buf[i + 1] != 't' || buf[i + 2] != 'y' || buf[i + 3] != 'p') continue;
+                    int boxStart = i - 4;
+                    long bs = ((buf[boxStart] & 0xFFL) << 24) | ((buf[boxStart + 1] & 0xFFL) << 16)
+                            | ((buf[boxStart + 2] & 0xFFL) << 8) | (buf[boxStart + 3] & 0xFFL);
+                    long fileBox = base + boxStart;
+                    if (bs < 16 || fileBox + bs > size) continue;
+                    if (fileBox + bs + 8 <= size && !isPlausibleBoxAt(raf, fileBox + bs, size)) continue;
+                    return fileBox;
                 }
-                carry = 8;
+                int carry = Math.min(16, total);
                 System.arraycopy(buf, total - carry, buf, 0, carry);
-                filePos += n;
+                base = base + total - carry;
+                filled = carry;
             }
         }
         return -1;
+    }
+
+    /** pos 处是否是 [size][ftyp] 的 MP4 box 头(给 XMP 声明长度定位用)。 */
+    private static boolean isMp4BoxStart(RandomAccessFile raf, long pos) {
+        try {
+            byte[] b = new byte[8];
+            raf.seek(pos);
+            raf.readFully(b);
+            long bs = ((b[0] & 0xFFL) << 24) | ((b[1] & 0xFFL) << 16) | ((b[2] & 0xFFL) << 8) | (b[3] & 0xFFL);
+            return bs >= 16 && b[4] == 'f' && b[5] == 't' && b[6] == 'y' && b[7] == 'p';
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** pos 处的 box 头(size 合法且类型是可打印 ASCII),用于排除 ftyp 假命中。 */
+    private static boolean isPlausibleBoxAt(RandomAccessFile raf, long pos, long fileSize) {
+        try {
+            byte[] b = new byte[8];
+            raf.seek(pos);
+            raf.readFully(b);
+            long bs = ((b[0] & 0xFFL) << 24) | ((b[1] & 0xFFL) << 16) | ((b[2] & 0xFFL) << 8) | (b[3] & 0xFFL);
+            if (bs < 8 || pos + bs > fileSize) return false;
+            for (int i = 4; i < 8; i++) {
+                if (b[i] < 0x20 || b[i] > 0x7E) return false;
+            }
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     private static int indexOf(byte[] hay, byte[] needle) {

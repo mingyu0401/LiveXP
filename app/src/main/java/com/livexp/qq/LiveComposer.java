@@ -101,9 +101,23 @@ public final class LiveComposer {
         });
     }
 
+    /**
+     * 播放用合成入口:大图查看器点开实况图时,把「动态段 + 收尾定格」合成到指定缓存文件,
+     * 与转 MP4 走同一条管线(时间轴/音画处理一致),但不发布媒体库、不走 EXEC(调用方自己的后台线程)。
+     * 失败抛异常,调用方回退播原始切片。
+     */
+    static void composeTo(String srcPath, Out out, File dest) throws Exception {
+        compose(srcPath, out, dest);
+    }
+
     // ------------------------------------------------------------------ 主流程
 
     private static void compose(String srcPath, Out out) throws Exception {
+        File tmp = new File(TMP_DIR, "livexp_" + System.currentTimeMillis() + ".mp4");
+        compose(srcPath, out, tmp);
+    }
+
+    private static void compose(String srcPath, Out out, File tmp) throws Exception {
         File motion = LiveVideoPlayer.extract(srcPath);
         int[] img = boundsOf(srcPath);
 
@@ -111,7 +125,6 @@ public final class LiveComposer {
         MediaCodec enc = null;
         MediaCodec dec = null;
         MediaMuxer muxer = null;
-        File tmp = null;
         boolean ok = false;
         EncSink sink = null;
         try {
@@ -167,10 +180,10 @@ public final class LiveComposer {
                     MediaCodec.CONFIGURE_FLAG_ENCODE);
             enc.start();
 
-            if (!TMP_DIR.isDirectory() && !TMP_DIR.mkdirs()) {
+            File parent = tmp.getParentFile();
+            if (parent != null && !parent.isDirectory() && !parent.mkdirs()) {
                 throw new IllegalStateException("临时目录创建失败");
             }
-            tmp = new File(TMP_DIR, "livexp_" + System.currentTimeMillis() + ".mp4");
             muxer = new MediaMuxer(tmp.getAbsolutePath(),
                     MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
             sink = new EncSink(enc, muxer, af);
