@@ -117,6 +117,8 @@ public final class LiveSendHook {
                     Object result = param.getResult();
                     if (!(result instanceof View)) return;
                     final View bottom = (View) result;
+                    Log.i("getBottomView → " + bottom.getClass().getName()
+                            + " 已有按钮=" + (bottom.findViewById(BTN_ID) != null));
                     watch(bottom);
                     bottom.post(() -> injectButton(bottom, 0));
                     followSubclass(param.thisObject.getClass());
@@ -224,8 +226,13 @@ public final class LiveSendHook {
     }
 
     // ------------------------------------------------------------ 按钮
-    /** QQ 会重建底栏子 View(选图、切原图态都会),按钮被抹掉时靠这个看门人补挂回去。 */
+    /**
+     * QQ 会重建底栏子 View(选图、切原图态都会),按钮被抹掉时靠这个看门人补挂回去。
+     * 只盯 getBottomView 返回的那个底栏不够:实测第二次打开相册面板时底栏换成了
+     * LinearLayout 容器、getBottomView 也不再被调用,所以同样在 DecorView 上挂一份兜底。
+     */
     private static void watch(final View bottom) {
+        watchRoot(bottom.getRootView());
         synchronized (watchers) {
             if (watchers.containsKey(bottom)) return;
             android.view.ViewTreeObserver.OnGlobalLayoutListener l =
@@ -245,6 +252,60 @@ public final class LiveSendHook {
         }
     }
 
+    /** DecorView 级兜底:任何一次布局只要看到"原图/编辑 + 发送"的底栏而没有按钮,就补一个。 */
+    private static void watchRoot(final View root) {
+        if (root == null) return;
+        synchronized (watchers) {
+            if (watchers.containsKey(root)) return;
+            android.view.ViewTreeObserver.OnGlobalLayoutListener l =
+                    new android.view.ViewTreeObserver.OnGlobalLayoutListener() {
+                        @Override
+                        public void onGlobalLayout() {
+                            if (root.getWindowVisibility() != View.VISIBLE) return;
+                            long now = System.currentTimeMillis();
+                            if (now - lastEnsure < 400L) return;
+                            lastEnsure = now;
+                            ensureButton(root);
+                        }
+                    };
+            try {
+                root.getViewTreeObserver().addOnGlobalLayoutListener(l);
+                watchers.put(root, l);
+            } catch (Throwable t) {
+                Log.i("根看门人注册失败: " + t);
+            }
+        }
+    }
+
+    private static volatile long lastEnsure;
+
+    private static void ensureButton(View root) {
+        if (root == null) return;
+        try {
+            if (root.findViewById(BTN_ID) != null) return;
+            TextView anchor = findPreviewAnchor(root);
+            if (anchor == null) return;
+            injectInto(anchor.getContext(), anchor, "decor");
+        } catch (Throwable t) {
+            Log.i("兜底补挂失败: " + t);
+        }
+    }
+
+    /**
+     * 只在"单图预览页底栏"里找锚点:必须同时有"原图/编辑"和"发送"。
+     * 相册网格底栏(相册|编辑|原图|发送)也满足前一条,但这时没有选中单张图,
+     * 挂上去只会解析上一张、且占着网格底栏,所以用"相册"这个只出现在网格态的文案排除。
+     */
+    private static TextView findPreviewAnchor(View root) {
+        TextView anchor = findText(root, "原图");
+        if (anchor == null) anchor = findText(root, "编辑");
+        if (anchor == null) return null;
+        ViewGroup bar = anchor.getParent() instanceof ViewGroup ? (ViewGroup) anchor.getParent() : null;
+        if (bar == null) return null;
+        if (findText(bar, "发送") == null) return null;
+        return findText(bar, "相册") == null ? anchor : null;
+    }
+
     private static void injectButton(View bottom, int retry) {
         try {
             if (bottom.findViewById(BTN_ID) != null) return;
@@ -257,33 +318,39 @@ public final class LiveSendHook {
                 }
                 return;
             }
-            Context ctx = anchor.getContext();
-            final ViewGroup bar = (ViewGroup) anchor.getParent();
-            final TextView btn = new TextView(ctx);
-            btn.setId(BTN_ID);
-            btn.setSingleLine(true);
-            btn.setGravity(android.view.Gravity.CENTER);
-            btn.setPadding(dp(ctx, 8), dp(ctx, 3), dp(ctx, 8), dp(ctx, 3));
-            btn.setTextSize(TypedValue.COMPLEX_UNIT_PX, anchor.getTextSize());
-            ViewGroup.LayoutParams lp = new ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            int at = Math.min(bar.indexOfChild(anchor) + 1, bar.getChildCount());
-            bar.addView(btn, at, lp);
-            synchronized (buttons) {
-                buttons.put(bottom, btn);
-            }
-            btn.setOnClickListener(v -> toggle(btn));
-            btn.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> place(btn, anchor, bar));
-            style(btn);
-            label(btn);
-            place(btn, anchor, bar);
-            btn.post(() -> place(btn, anchor, bar));
-            btn.postDelayed(() -> place(btn, anchor, bar), 400L);
-            Log.i("解析实况按钮已挂上 bar=" + bar.getClass().getName());
-            logHostActivity(bottom);
+            injectInto(bottom.getContext(), anchor, "bar");
         } catch (Throwable t) {
             Log.i("inject button failed: " + t);
         }
+    }
+
+    private static void injectInto(Context ctx, TextView anchor, String from) {
+        if (!LiveSettings.sendParseEnabled(ctx)) return;
+        final ViewGroup bar = anchor.getParent() instanceof ViewGroup
+                ? (ViewGroup) anchor.getParent() : null;
+        if (bar == null || bar.findViewById(BTN_ID) != null) return;
+        final TextView btn = new TextView(ctx);
+        btn.setId(BTN_ID);
+        btn.setSingleLine(true);
+        btn.setGravity(android.view.Gravity.CENTER);
+        btn.setPadding(dp(ctx, 8), dp(ctx, 3), dp(ctx, 8), dp(ctx, 3));
+        btn.setTextSize(TypedValue.COMPLEX_UNIT_PX, anchor.getTextSize());
+        ViewGroup.LayoutParams lp = new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        int at = Math.min(bar.indexOfChild(anchor) + 1, bar.getChildCount());
+        bar.addView(btn, at, lp);
+        synchronized (buttons) {
+            buttons.put(bar, btn);
+        }
+        btn.setOnClickListener(v -> toggle(btn));
+        btn.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> place(btn, anchor, bar));
+        style(btn);
+        label(btn);
+        place(btn, anchor, bar);
+        btn.post(() -> place(btn, anchor, bar));
+        btn.postDelayed(() -> place(btn, anchor, bar), 400L);
+        Log.i("解析实况按钮已挂上(" + from + ") bar=" + bar.getClass().getName());
+        logHostActivity(bar);
     }
 
     /** 首次进入某个预览页时记一行宿主 Activity(半屏面板与全屏图库是不同类)。 */
@@ -361,9 +428,14 @@ public final class LiveSendHook {
             Log.i("解析实况:当前没有选中图片,忽略点击");
             return;
         }
+        if (!LiveSettings.sendParseEnabled(btn.getContext())) {
+            Log.i("解析实况:功能已在设置里关闭,忽略点击");
+            return;
+        }
         Job j = job(path);
         j.checked = !j.checked;
         if (j.checked && j.status != ST_READY && j.status != ST_PARSING) {
+            j.sent = false;
             startParse(path, j);
         }
         if (!j.checked && j.out != null) {
@@ -407,6 +479,34 @@ public final class LiveSendHook {
                 });
             }
         }
+    }
+
+    /** 设置里关掉「解析实况」:撤掉已经挂上的按钮,并把未发送的合成产物回收掉。 */
+    static void onParseDisabled() {
+        MAIN.post(() -> {
+            try {
+                synchronized (buttons) {
+                    for (TextView btn : new java.util.ArrayList<>(buttons.values())) {
+                        if (btn == null) continue;
+                        ViewGroup parent = btn.getParent() instanceof ViewGroup
+                                ? (ViewGroup) btn.getParent() : null;
+                        if (parent != null) parent.removeView(btn);
+                    }
+                    buttons.clear();
+                }
+                for (Job j : jobs.values()) {
+                    j.checked = false;
+                    if (j.status != ST_PARSING && j.out != null) {
+                        LiveComposer.discard(j.out);
+                        j.out = null;
+                        j.status = ST_NONE;
+                    }
+                }
+                Log.i("setting off: 已撤下解析实况按钮");
+            } catch (Throwable t) {
+                Log.i("remove parse buttons failed: " + t);
+            }
+        });
     }
 
     private static void style(TextView btn) {
@@ -478,7 +578,14 @@ public final class LiveSendHook {
                 LiveComposer.discard(j.out);
                 j.out = null;
             }
+            // 这次按原图发出去了,勾选状态必须一起清掉:否则回到这张图时按钮还是蓝色选中态,
+            // 但解析状态已归零,第一次点击只会取消勾选,看起来像"点了没反应"。
+            // sent 也要复位,否则同一张图再次勾选解析时,结果会在回调里被当成"已发送"直接丢弃。
+            j.checked = false;
+            j.sent = false;
+            if (j.status != ST_PARSING) j.status = ST_NONE;
             Log.i("send: 未就绪,按原图发送 path=" + path + " status=" + j.status);
+            MAIN.post(LiveSendHook::refreshButtons);
             return;
         }
         LiveComposer.Out out = j.out;
