@@ -39,9 +39,6 @@ public final class LiveComposer {
             new File("/sdcard/Android/data/com.tencent.mobileqq/LiveXP/send_tmp");
 
     static final long STILL_US = 3_000_000L;
-    /** 动态段目标时长:内嵌视频不足时循环补足到这个长度,复刻相册实况回放的观感。 */
-    private static final long MOTION_TARGET_US = 2_500_000L;
-    private static final int MAX_MOTION_LOOPS = 4;
     private static final int FPS = 30;
     private static final int MAX_EDGE = 1920;
     private static final int MAX_MOTION_FRAMES = 1200;
@@ -186,8 +183,8 @@ public final class LiveComposer {
             int stillFrames = (int) (STILL_US / frameUs);
 
             // ---- 段 1:动态视频轨(实况的动态部分先播)
-            // OPPO 实况的内嵌视频普遍只有 0.8~1.2s,但相册回放观感有两三秒(循环播)。
-            // 动态段不足 MOTION_TARGET_US 时从头循环补足,复刻相册观感。
+            // 内嵌视频本身只有 1~3 秒,这里按解码出来的真实时长收尾:
+            // 以前为了凑时长会循环补足,合成后动态段被播了两遍。
             vx.selectTrack(vTrack);
             dec = MediaCodec.createDecoderByType(decMime);
             dec.configure(vf, null, null, 0);
@@ -196,67 +193,49 @@ public final class LiveComposer {
             byte[] mU = new byte[(codedW / 2) * (codedH / 2)];
             byte[] mV = new byte[(codedW / 2) * (codedH / 2)];
             MediaCodec.BufferInfo bi = new MediaCodec.BufferInfo();
+            long firstPts = Long.MIN_VALUE;
             long lastPts = 0;
             int frames = 0;
-            int loops = 0;
+            boolean eos = false;
             long deadline = System.currentTimeMillis() + 150_000L;
-            while (frames < MAX_MOTION_FRAMES && System.currentTimeMillis() < deadline) {
-                vx.seekTo(0, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
-                long firstPts = Long.MIN_VALUE;
-                long passEnd = lastPts;
-                boolean eos = false;
-                while (!eos && System.currentTimeMillis() < deadline) {
-                    int ii = dec.dequeueInputBuffer(10_000);
-                    if (ii >= 0) {
-                        ByteBuffer in = dec.getInputBuffer(ii);
-                        int n = in == null ? -1 : vx.readSampleData(in, 0);
-                        if (n < 0) {
-                            dec.queueInputBuffer(ii, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                        } else {
-                            in.position(0);
-                            in.limit(n);
-                            dec.queueInputBuffer(ii, 0, n, vx.getSampleTime(), 0);
-                            vx.advance();
-                        }
+            while (!eos && frames < MAX_MOTION_FRAMES && System.currentTimeMillis() < deadline) {
+                int ii = dec.dequeueInputBuffer(10_000);
+                if (ii >= 0) {
+                    ByteBuffer in = dec.getInputBuffer(ii);
+                    int n = in == null ? -1 : vx.readSampleData(in, 0);
+                    if (n < 0) {
+                        dec.queueInputBuffer(ii, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                    } else {
+                        in.position(0);
+                        in.limit(n);
+                        dec.queueInputBuffer(ii, 0, n, vx.getSampleTime(), 0);
+                        vx.advance();
                     }
-                    int oi = dec.dequeueOutputBuffer(bi, 10_000);
-                    if (oi < 0) continue;
-                    boolean config = (bi.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
-                    if (!config && bi.size > 0) {
-                        android.media.Image im = dec.getOutputImage(oi);
-                        if (im != null) {
-                            unpack(im, mY, mU, mV, codedW, codedH);
-                            blit(mY, mU, mV, codedW, codedH, cropL, cropT, cropR, cropB,
-                                    rot, scale, y, u, v, dims[0], dims[1]);
-                            long pts = Math.max(0, bi.presentationTimeUs);
-                            if (pts < firstPts || firstPts == Long.MIN_VALUE) firstPts = pts;
-                            long outPts = pts - firstPts + lastPts;
-                            if (outPts < lastPts) outPts = lastPts;
-                            passEnd = outPts;
-                            sink.write(y, u, v, dims[0], dims[1], outPts,
-                                    frames == 0 ? MediaCodec.BUFFER_FLAG_SYNC_FRAME : 0);
-                            frames++;
-                        }
-                    }
-                    dec.releaseOutputBuffer(oi, false);
-                    if ((bi.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) eos = true;
                 }
-                if (frames == 0) throw new IllegalStateException("动态段一帧都没解出来");
-                lastPts = passEnd;
-                boolean needMore = lastPts + frameUs < MOTION_TARGET_US
-                        && loops + 1 < MAX_MOTION_LOOPS;
-                if (!needMore) break;
-                // 循环重播:解码器 flush 后从关键帧重新起播
-                dec.flush();
-                loops++;
-                Log.i("motion loop " + loops + ": 段内累计 "
-                        + ((lastPts + frameUs) / 1000) + "ms,继续补足");
+                int oi = dec.dequeueOutputBuffer(bi, 10_000);
+                if (oi < 0) continue;
+                boolean config = (bi.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0;
+                if (!config && bi.size > 0) {
+                    android.media.Image im = dec.getOutputImage(oi);
+                    if (im != null) {
+                        unpack(im, mY, mU, mV, codedW, codedH);
+                        blit(mY, mU, mV, codedW, codedH, cropL, cropT, cropR, cropB,
+                                rot, scale, y, u, v, dims[0], dims[1]);
+                        long pts = Math.max(0, bi.presentationTimeUs);
+                        if (firstPts == Long.MIN_VALUE) firstPts = pts;
+                        long outPts = pts - firstPts;
+                        lastPts = outPts;
+                        sink.write(y, u, v, dims[0], dims[1], outPts,
+                                frames == 0 ? MediaCodec.BUFFER_FLAG_SYNC_FRAME : 0);
+                        frames++;
+                    }
+                }
+                dec.releaseOutputBuffer(oi, false);
+                if ((bi.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) eos = true;
             }
-            if (loops > 0) {
-                Log.i("motion loops total=" + loops + " 动态段=" + ((lastPts + frameUs) / 1000)
-                        + "ms,音频只覆盖第一遍");
-            }
+            if (frames == 0) throw new IllegalStateException("动态段一帧都没解出来");
             long motionEndUs = lastPts + frameUs;
+            Log.i("motion dur=" + (motionEndUs / 1000) + "ms frames=" + frames);
 
             // ---- 段 2:定格画面(动态播完后停在照片上)
             StillFrame still = buildStill(srcPath, dims[0], dims[1], exif);
