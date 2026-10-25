@@ -254,7 +254,7 @@ public final class LiveComposer {
             }
             if (loops > 0) {
                 Log.i("motion loops total=" + loops + " 动态段=" + ((lastPts + frameUs) / 1000)
-                        + "ms,音频丢弃(循环段无对应音轨)");
+                        + "ms,音频只覆盖第一遍");
             }
             long motionEndUs = lastPts + frameUs;
 
@@ -266,10 +266,9 @@ public final class LiveComposer {
             }
             out.durationUs = motionEndUs + stillFrames * frameUs;
             sink.finish();
-            if (loops > 0) {
-                // 循环补足的动态段没有对应的音频素材,硬接上去会在第二遍起无声不同步,干脆不留音轨
-                out.hasAudio = false;
-            } else if (af != null && sink.audioTrack >= 0) {
+            if (af != null && sink.audioTrack >= 0) {
+                // 音频必须和动态段同一条时间线:以前整体后移到定格段,
+                // 会在音频轨前留下 3 秒空编辑,播放器(如 QQ)会直接跳到音频起点,看起来"前三秒被快速跳过"。
                 out.hasAudio = remuxAudio(vx, vTrack, aTrack, muxer, sink.audioTrack, motionEndUs);
             }
             out.file = tmp;
@@ -403,8 +402,9 @@ public final class LiveComposer {
     }
 
     /** 音频不重编码,整条 remux,时间戳整体后移到动态段之后。 */
+    /** 音频不重编码,按原生时间戳 remux;只保留动态段(limitUs)以内的样本。 */
     private static boolean remuxAudio(MediaExtractor ex, int videoTrack, int track, MediaMuxer muxer,
-                                      int idx, long shiftUs) {
+                                      int idx, long limitUs) {
         try {
             ex.unselectTrack(videoTrack);
             ex.selectTrack(track);
@@ -412,17 +412,21 @@ public final class LiveComposer {
             MediaCodec.BufferInfo bi = new MediaCodec.BufferInfo();
             ByteBuffer buf = ByteBuffer.allocate(256 * 1024);
             int n;
+            int written = 0;
             while ((n = ex.readSampleData(buf, 0)) >= 0) {
+                long t = Math.max(0, ex.getSampleTime());
+                if (t >= limitUs) break;
                 buf.position(0);
                 buf.limit(n);
                 bi.offset = 0;
                 bi.size = n;
-                bi.presentationTimeUs = Math.max(0, ex.getSampleTime()) + shiftUs;
+                bi.presentationTimeUs = t;
                 bi.flags = 0;
                 muxer.writeSampleData(idx, buf, bi);
+                written++;
                 ex.advance();
             }
-            return true;
+            return written > 0;
         } catch (Throwable t) {
             Log.i("audio remux failed: " + t);
             return false;
