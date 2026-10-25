@@ -45,6 +45,50 @@ public final class ModuleAboutPage {
         }
     }
 
+    /**
+     * 滑块保存桥:QQ 进程内(页面宿主是 QQ 的 Context)直接落盘;
+     * 独立 App 直写失败时(Android 11+ 常规限制 Android/data 他包目录)广播托
+     * QQ 进程里的模块代写,保存结果同步返回给页面显示。
+     */
+    public static final class ThresholdBridge {
+        private static final String QQ_PKG = "com.tencent.mobileqq";
+        private final Context ctx;
+
+        ThresholdBridge(Context ctx) {
+            this.ctx = ctx;
+        }
+
+        @android.webkit.JavascriptInterface
+        public String get() {
+            return String.valueOf(ThresholdConfig.get());
+        }
+
+        /** @return ok=已落盘 / sent=已转发 QQ 进程(下次心跳确认) / fail=保存失败 */
+        @android.webkit.JavascriptInterface
+        public String set(String kb) {
+            final long bytes;
+            try {
+                bytes = Long.parseLong(kb.trim()) * 1024L;
+            } catch (NumberFormatException e) {
+                return "fail";
+            }
+            if (ThresholdConfig.set(bytes)) return "ok";
+            if (ctx != null && !QQ_PKG.equals(ctx.getPackageName())) {
+                try {
+                    Intent i = new Intent(StatusBridge.ACTION_SET_THRESHOLD);
+                    i.setPackage(QQ_PKG);
+                    i.putExtra("bytes", ThresholdConfig.clamp(bytes));
+                    ctx.sendBroadcast(i);
+                    Log.i("threshold set forwarded to qq process: " + bytes + " bytes");
+                    return "sent";
+                } catch (Throwable t) {
+                    Log.i("threshold set forward failed: " + t);
+                }
+            }
+            return "fail";
+        }
+    }
+
     private ModuleAboutPage() {}
 
     /** 跟随系统夜间模式;取不到明确浅色状态时默认深色。 */
@@ -65,6 +109,7 @@ public final class ModuleAboutPage {
         // 长按彩蛋靠页面 JS 触发;WebView 默认关闭 JavaScript,之前一直没开导致看不到震动
         web.getSettings().setJavaScriptEnabled(true);
         web.addJavascriptInterface(new HapticBridge(ctx), "LiveXPHaptic");
+        web.addJavascriptInterface(new ThresholdBridge(ctx), "LiveXPThreshold");
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
@@ -277,6 +322,17 @@ public final class ModuleAboutPage {
                 .append(";border:1px solid ").append(cardBorder).append(";border-radius:6px;padding:1px 6px}")
                 .append(".secTip{font-size:11.5px;color:").append(sub)
                 .append(";line-height:1.75;margin:8px 0 10px;overflow-wrap:break-word}")
+                .append(".thRow{display:flex;align-items:center;gap:12px;margin-top:16px}")
+                .append(".thRange{flex:1;-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;")
+                .append("background:").append(cardBorder).append(";outline:none;padding:0}")
+                .append(".thRange::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:22px;height:22px;")
+                .append("border-radius:50%;background:linear-gradient(135deg,#a78bfa,#38bdf8);border:none}")
+                .append(".thVal{min-width:54px;text-align:right;font-size:14px;font-weight:bold;flex:none}")
+                .append(".thState{font-size:12px;color:").append(sub).append(";margin-top:8px;min-height:16px}")
+                .append(".thState.ok{color:#34d399}")
+                .append(".thState.sent{color:#fbbf24}")
+                .append(".thState.err{color:#f85149}")
+                .append(".thReset{font-size:11.5px;color:#58a6ff;text-decoration:none;margin-left:8px}")
                 .append("a.cl,div.cl{display:flex;align-items:flex-start;gap:8px;text-decoration:none;color:")
                 .append(main).append(";padding:11px 4px;border-bottom:1px solid ").append(cardBorder).append("}")
                 .append("a.cl:active{background:").append(cardActive).append("}")
@@ -306,6 +362,7 @@ public final class ModuleAboutPage {
                 .append("<div class='ver' id='verLine'>").append(verText).append("</div>")
                 .append("<div class='desc'>").append(descHtml).append("</div>")
                 .append("<div class='cards'>").append(cards(appMode)).append("</div>")
+                .append(thresholdSection())
                 .append(credits(sub, cardBorder, appMode))
                 .append("<div class='foot'><a class='log' href='livexp://logs'>查看运行日志</a></div>")
                 .append(script())
@@ -331,6 +388,30 @@ public final class ModuleAboutPage {
         return sb.toString();
     }
 
+    /** 「实况检测大小阈值」滑块区块:100KB~10MB、步进 100KB,松手保存;QQ 进程页与独立 App 页共用。 */
+    private static String thresholdSection() {
+        long kb = ThresholdConfig.get() / 1024;
+        return "<div class='sec'>"
+                + "<div class='secH'>实况检测大小阈值<span class='tag'>可调</span>"
+                + "<a class='thReset' href='#' id='thReset'>恢复默认 1MB</a></div>"
+                + "<div class='secTip'>文件大小 ≥ 阈值才会进入实况扫描与原图反查,默认 1MB(与旧版一致)。"
+                + "松手即保存、即时生效,无需重启 QQ。<br>"
+                + "<b>注意:</b>调小阈值会让更多文件进入扫描,提高 CPU 占用与耗电(大量小文件扫描可能明显发热),"
+                + "没有需要请保持默认。</div>"
+                + "<div class='thRow'>"
+                + "<input type='range' class='thRange' id='thSlider' min='100' max='10240' step='100' value='" + kb + "'>"
+                + "<div class='thVal' id='thVal'>" + fmtKb(kb) + "</div>"
+                + "</div>"
+                + "<div class='thState' id='thState'></div>"
+                + "</div>";
+    }
+
+    /** 100KB~10MB 的人类可读值;KB 整数显示,MB 保留一位小数(如 1.0MB / 2.5MB)。 */
+    static String fmtKb(long kb) {
+        if (kb < 1024) return kb + "KB";
+        return String.format(java.util.Locale.US, "%.1fMB", kb / 1024.0);
+    }
+
     /** 长按顶部图案:430ms 后触发 3 秒渐快震动(Android 侧执行),松手/滑走即停。 */
     private static String script() {
         return "<script>"
@@ -340,6 +421,36 @@ public final class ModuleAboutPage {
                 + "if(t)t.textContent=active?'LiveXP 已激活':'LiveXP 未激活';"
                 + "var v=document.getElementById('verLine');"
                 + "if(v&&ver)v.textContent=ver;}"
+                + "var thS=document.getElementById('thSlider'),"
+                + "thV=document.getElementById('thVal'),"
+                + "thT=document.getElementById('thState'),"
+                + "thPending=-1,thTouch=false;"
+                + "function fmtKb(kb){return kb<1024?kb+'KB':(kb/1024).toFixed(1)+'MB';}"
+                + "function thSave(){"
+                + "var kb=+thS.value;"
+                + "thT.textContent='保存中…';thT.className='thState';"
+                + "try{"
+                + "var r=window.LiveXPThreshold?String(LiveXPThreshold.set(String(kb))):'fail';"
+                + "if(r==='ok'){thPending=-1;thT.textContent='已保存 '+fmtKb(kb)+' ✓';thT.className='thState ok';}"
+                + "else if(r==='sent'){thPending=kb;thT.textContent='已转发 QQ 进程保存,QQ 在线时生效';thT.className='thState sent';}"
+                + "else{thT.textContent='保存失败,值未写入';thT.className='thState err';}"
+                + "}catch(e){thT.textContent='保存失败:'+e;thT.className='thState err';}}"
+                + "if(thS){"
+                + "thS.addEventListener('input',function(){thV.textContent=fmtKb(+thS.value);});"
+                + "thS.addEventListener('change',thSave);"
+                + "thS.addEventListener('touchstart',function(){thTouch=true;},{passive:true});"
+                + "thS.addEventListener('touchend',function(){thTouch=false;},{passive:true});"
+                + "var thR=document.getElementById('thReset');"
+                + "if(thR)thR.addEventListener('click',function(e){e.preventDefault();"
+                + "thS.value=1024;thV.textContent=fmtKb(1024);thSave();});"
+                + "}"
+                // 独立 App 收到 QQ 进程心跳里的权威阈值时同步滑块(拖动中/待确认时不打扰)
+                + "function livexpThreshold(bytes){"
+                + "if(!thS||thTouch)return;"
+                + "var kb=Math.round(bytes/1024);"
+                + "if(thPending>=0&&kb===thPending){thPending=-1;"
+                + "thT.textContent='已保存 '+fmtKb(kb)+' ✓';thT.className='thState ok';return;}"
+                + "if(thPending<0){thS.value=kb;thV.textContent=fmtKb(kb);}}"
                 + "(function(){"
                 + "var hero=document.getElementById('hero');if(!hero)return;"
                 + "var timer=null,fired=false,sx=0,sy=0,lastBuzz=0;"

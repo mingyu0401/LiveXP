@@ -34,6 +34,7 @@ public class StatusProvider extends ContentProvider {
                 .putString("lsposed", extras.getString("lsposed"))
                 .putInt("api", extras.getInt("api", -1))
                 .putString("qq", extras.getString("qq"))
+                .putLong("threshold", extras.getLong("threshold", -1))
                 .apply();
         out.putBoolean("ok", true);
         return out;

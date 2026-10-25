@@ -389,7 +389,7 @@ public final class LiveVideoPlayer {
                     Activity act = galleryRef;
                     if (act == null || act.isFinishing()) return;
                     File f = new File(path);
-                    if (f.isFile() && f.length() >= LivePhotoDetector.MIN_DETECT_BYTES) {
+                    if (f.isFile() && f.length() >= LivePhotoDetector.minDetectBytes()) {
                         boolean live = forceLive || LivePhotoDetector.isMotionPhotoFile(path);
                         Log.i("candidate scanned: " + f.getName() + " -> " + (live ? "LIVE" : "static"));
                         if (!live) {
@@ -587,7 +587,7 @@ public final class LiveVideoPlayer {
             currentSrc = path;
             installButton(act);
             File f = new File(path);
-            if (f.isFile() && f.length() >= LivePhotoDetector.MIN_DETECT_BYTES) {
+            if (f.isFile() && f.length() >= LivePhotoDetector.minDetectBytes()) {
                 playAuto(act, path);
             } else {
                 playWhenReady(msgId, path, md5, true, ignoreStatic);

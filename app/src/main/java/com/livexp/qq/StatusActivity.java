@@ -143,6 +143,7 @@ public class StatusActivity extends Activity {
             stateActive = active;
             stateVer = ver;
             applyState(active, ver);
+            if (active) applyThreshold(sp.getLong("threshold", -1));
             handler.postDelayed(this::checkActive, REFRESH_MS);
         }, PING_WAIT_MS);
     }
@@ -152,6 +153,15 @@ public class StatusActivity extends Activity {
         if (web == null || !pageLoaded) return;
         try {
             web.evaluateJavascript("livexpState(" + active + "," + JSONObject.quote(ver) + ")", null);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 把 QQ 进程回报的权威阈值推给滑块;顺带确认「已转发 QQ 进程保存」是否落盘。 */
+    private void applyThreshold(long bytes) {
+        if (web == null || !pageLoaded || bytes <= 0) return;
+        try {
+            web.evaluateJavascript("livexpThreshold(" + bytes + ")", null);
         } catch (Throwable ignored) {
         }
     }
