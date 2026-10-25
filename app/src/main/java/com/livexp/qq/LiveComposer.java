@@ -179,7 +179,6 @@ public final class LiveComposer {
             byte[] u = new byte[(dims[0] / 2) * (dims[1] / 2)];
             byte[] v = new byte[(dims[0] / 2) * (dims[1] / 2)];
 
-            Badge badge = new Badge(dims[0], dims[1]);
             long frameUs = 1_000_000L / FPS;
             int stillFrames = (int) (STILL_US / frameUs);
 
@@ -221,7 +220,6 @@ public final class LiveComposer {
                         unpack(im, mY, mU, mV, codedW, codedH);
                         blit(mY, mU, mV, codedW, codedH, cropL, cropT, cropR, cropB,
                                 rot, scale, y, u, v, dims[0], dims[1]);
-                        badge.blend(y, u, v, dims[0], dims[1]);
                         long pts = Math.max(0, bi.presentationTimeUs);
                         if (pts < firstPts || firstPts == Long.MIN_VALUE) firstPts = pts;
                         long outPts = pts - firstPts;
@@ -240,8 +238,6 @@ public final class LiveComposer {
 
             // ---- 段 2:定格画面(动态播完后停在照片上)
             StillFrame still = buildStill(srcPath, dims[0], dims[1], exif);
-            // 只叠一次:逐帧重复 alpha 混合会让半透明底在定格段里"越压越黑",画面不再恒定。
-            badge.blend(still.y, still.u, still.v, dims[0], dims[1]);
             for (int i = 0; i < stillFrames; i++) {
                 sink.write(still.y, still.u, still.v, dims[0], dims[1], motionEndUs + i * frameUs,
                         i == 0 ? MediaCodec.BUFFER_FLAG_SYNC_FRAME : 0);
@@ -840,93 +836,6 @@ public final class LiveComposer {
         if (syy < ct) syy = ct;
         if (syy > cb) syy = cb;
         return syy * sw + sx;
-    }
-
-    // ------------------------------------------------------------- 画面烧录角标
-
-    /** 与 BadgeInjector 同款视觉(半透明深色圆角底 + 白色点环),在 packed I420 上做 alpha 混合。 */
-    private static final class Badge {
-        private final int left;
-        private final int top;
-        private final int size;
-        private final byte[] py;
-        private final byte[] pu;
-        private final byte[] pv;
-        private final int[] aY;
-        private final int[] aUv;
-
-        Badge(int frameW, int frameH) {
-            int s = Math.max(40, Math.min(128, Math.min(frameW, frameH) * 18 / 100));
-            size = (s / 4) * 4;                       // 4 的倍数,亮度和色度网格都对齐
-            left = Math.max(2, frameW / 40) & ~1;
-            top = Math.max(2, frameH / 40) & ~1;
-            Bitmap bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-            Canvas c = new Canvas(bmp);
-            android.graphics.drawable.GradientDrawable bg =
-                    new android.graphics.drawable.GradientDrawable();
-            bg.setColor(0x99000000);
-            bg.setCornerRadius(size * 0.29f);
-            bg.setBounds(0, 0, size, size);
-            bg.draw(c);
-            int pad = (int) (size * 0.16f);
-            LiveMarkView.drawMark(c, pad, pad, size - pad * 2, 0xFFFFFFFF);
-            int[] px = new int[size * size];
-            bmp.getPixels(px, 0, size, 0, 0, size, size);
-            bmp.recycle();
-            StillFrame st = new StillFrame();
-            rgbToI420(px, st, size, size);
-            py = st.y;
-            pu = st.u;
-            pv = st.v;
-            aY = new int[size * size];
-            for (int i = 0; i < px.length; i++) {
-                aY[i] = Math.min(255, ((px[i] >>> 24) & 0xFF) * 5 / 4);
-            }
-            int half = size / 2;
-            aUv = new int[half * half];
-            for (int j = 0; j < half; j++) {
-                for (int i = 0; i < half; i++) {
-                    int sum = aY[(j * 2) * size + i * 2] + aY[(j * 2) * size + i * 2 + 1]
-                            + aY[(j * 2 + 1) * size + i * 2] + aY[(j * 2 + 1) * size + i * 2 + 1];
-                    aUv[j * half + i] = sum / 4;
-                }
-            }
-        }
-
-        void blend(byte[] y, byte[] u, byte[] v, int fw, int fh) {
-            int ex = Math.min(left + size, fw);
-            int ey = Math.min(top + size, fh);
-            for (int row = top; row < ey; row++) {
-                int brow = row - top;
-                int dBase = row * fw;
-                for (int col = left; col < ex; col++) {
-                    int k = brow * size + (col - left);
-                    int a = aY[k];
-                    if (a == 0) continue;
-                    int p = dBase + col;
-                    int src = py[k] & 0xFF;
-                    y[p] = (byte) clamp((y[p] & 0xFF) + ((src - (y[p] & 0xFF)) * a / 255));
-                }
-            }
-            int half = size / 2;
-            int cwy = fw / 2;
-            int cex = Math.min((left + size) / 2, cwy);
-            int cey = Math.min((top + size) / 2, fh / 2);
-            for (int row = top / 2; row < cey; row++) {
-                int brow = row - top / 2;
-                for (int col = left / 2; col < cex; col++) {
-                    int k = brow * half + (col - left / 2);
-                    int a = aUv[k];
-                    if (a == 0) continue;
-                    int p = row * cwy + col;
-                    if (p >= u.length) continue;
-                    int su = pu[k] & 0xFF;
-                    int sv = pv[k] & 0xFF;
-                    u[p] = (byte) clamp((u[p] & 0xFF) + ((su - (u[p] & 0xFF)) * a / 255));
-                    v[p] = (byte) clamp((v[p] & 0xFF) + ((sv - (v[p] & 0xFF)) * a / 255));
-                }
-            }
-        }
     }
 
     // ------------------------------------------------------------- 媒体库发布
