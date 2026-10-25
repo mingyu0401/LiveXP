@@ -49,6 +49,20 @@ public final class Haptics {
         }
     }
 
+    /** 开关类控件的一声轻点反馈。 */
+    public static void tick(Context ctx) {
+        try {
+            Vibrator v = (Vibrator) ctx.getSystemService(Context.VIBRATOR_SERVICE);
+            if (v == null || !v.hasVibrator()) return;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                v.vibrate(VibrationEffect.createOneShot(10, 80));
+            } else {
+                v.vibrate(10);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     /** 交替的 [间隔, 震动] 序列:间隔从 220ms 指数衰减到 40ms,总时长不超过 total。 */
     static long[] ramp(long total) {
         java.util.ArrayList<Long> out = new java.util.ArrayList<>();

@@ -45,6 +45,26 @@ public final class ModuleAboutPage {
         }
     }
 
+    /** 模块开关读写:设置页里的开关直接落到 QQ 进程的 SharedPreferences。 */
+    public static final class SettingsBridge {
+        private final Context ctx;
+
+        SettingsBridge(Context ctx) {
+            this.ctx = ctx;
+        }
+
+        @android.webkit.JavascriptInterface
+        public boolean getSendParse() {
+            return LiveSettings.sendParseEnabled(ctx);
+        }
+
+        @android.webkit.JavascriptInterface
+        public void setSendParse(boolean on) {
+            LiveSettings.setSendParseEnabled(ctx, on);
+            Haptics.tick(ctx);
+        }
+    }
+
     private ModuleAboutPage() {}
 
     /** 跟随系统夜间模式;取不到明确浅色状态时默认深色。 */
@@ -65,6 +85,7 @@ public final class ModuleAboutPage {
         // 长按彩蛋靠页面 JS 触发;WebView 默认关闭 JavaScript,之前一直没开导致看不到震动
         web.getSettings().setJavaScriptEnabled(true);
         web.addJavascriptInterface(new HapticBridge(ctx), "LiveXPHaptic");
+        web.addJavascriptInterface(new SettingsBridge(ctx), "LiveXPSettings");
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
@@ -169,12 +190,12 @@ public final class ModuleAboutPage {
         StringBuilder ver = new StringBuilder("v").append(BuildConfig.VERSION_NAME);
         ver.append(" · for QQ").append(qq == null ? "" : " " + qq).append(" (NT)");
         ver.append(" · ").append(lsp);
-        return buildHtml(dark, false, true, ver.toString());
+        return buildHtml(dark, false, true, LiveSettings.sendParseEnabled(ctx), ver.toString());
     }
 
     /** 独立 App:显示激活状态与 LSPosed 版本;未激活时停掉全部炫彩。 */
     public static String appHtml(Context ctx, boolean dark, boolean active, String verText) {
-        return buildHtml(dark, true, active, verText);
+        return buildHtml(dark, true, active, LiveSettings.sendParseEnabled(ctx), verText);
     }
 
     public static Dialog showDialog(Context ctx, Actions actions) {
@@ -210,7 +231,8 @@ public final class ModuleAboutPage {
         return dialog;
     }
 
-    private static String buildHtml(boolean dark, boolean appMode, boolean active, String verText) {
+    private static String buildHtml(boolean dark, boolean appMode, boolean active,
+                                    boolean parseOn, String verText) {
         String bg = dark
                 ? "radial-gradient(1200px 600px at 50% -10%,#16202e 0%,#0d1117 60%),#0d1117"
                 : "radial-gradient(1200px 600px at 50% -10%,#eaeef2 0%,#f6f8fa 60%),#f6f8fa";
@@ -255,6 +277,32 @@ public final class ModuleAboutPage {
                 .append("line-height:1.7;max-width:420px}")
                 .append(".desc{color:").append(desc).append(";font-size:14px;line-height:1.8;margin:20px 0 26px;")
                 .append("text-align:center;max-width:420px}")
+                .append(".set{width:100%;max-width:420px;display:flex;align-items:center;gap:14px;")
+                .append("background:").append(cardBg).append(";border:1px solid ").append(cardBorder)
+                .append(";border-radius:14px;padding:14px 16px;margin:0 0 12px;transition:background .2s}")
+                .append(".set:active{background:").append(cardActive).append("}")
+                .append(".setIco{width:38px;height:38px;border-radius:10px;flex:none;display:flex;")
+                .append("align-items:center;justify-content:center;")
+                .append("background:linear-gradient(135deg,#2ea043,#38bdf8)}")
+                .append(".setMain{flex:1;min-width:0}")
+                .append(".setT{font-size:15px;font-weight:bold}")
+                .append(".setD{font-size:11.5px;color:").append(sub).append(";line-height:1.6;margin-top:3px}")
+                .append(".sw{position:relative;flex:none;width:52px;height:32px;border-radius:16px;")
+                .append("background:").append(dark ? "#3a4150" : "#cfd8e3").append(";")
+                .append("box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);")
+                .append("transition:background .3s cubic-bezier(.4,0,.2,1),transform .18s ease;")
+                .append("-webkit-tap-highlight-color:transparent}")
+                .append(".sw:active{transform:scale(.97)}")
+                .append(".sw .fill{position:absolute;left:0;right:0;top:0;bottom:0;border-radius:16px;")
+                .append("background:linear-gradient(135deg,#2ea043,#38bdf8);opacity:0;")
+                .append("transition:opacity .3s cubic-bezier(.4,0,.2,1)}")
+                .append(".sw.on .fill{opacity:1}")
+                .append(".sw .knob{position:absolute;left:3px;top:3px;width:26px;height:26px;border-radius:13px;")
+                .append("background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.35);")
+                .append("transition:transform .34s cubic-bezier(.34,1.4,.64,1),width .18s ease}")
+                .append(".sw.on .knob{transform:translateX(20px)}")
+                .append(".sw.press .knob{width:30px}")
+                .append(".sw.on.press .knob{transform:translateX(16px)}")
                 .append(".cards{width:100%;max-width:420px;display:flex;flex-direction:column;gap:12px}")
                 .append("a.card{display:flex;align-items:center;gap:14px;text-decoration:none;color:").append(main)
                 .append(";background:").append(cardBg).append(";border:1px solid ").append(cardBorder)
@@ -305,12 +353,27 @@ public final class ModuleAboutPage {
                 .append("<h1 class='rainbow' id='stateTitle'>").append(title).append("</h1>")
                 .append("<div class='ver' id='verLine'>").append(verText).append("</div>")
                 .append("<div class='desc'>").append(descHtml).append("</div>")
+                .append(appMode ? "" : settingsCard(parseOn))
                 .append("<div class='cards'>").append(cards(appMode)).append("</div>")
                 .append(credits(sub, cardBorder, appMode))
                 .append("<div class='foot'><a class='log' href='livexp://logs'>查看运行日志</a></div>")
                 .append(script())
                 .append("</body></html>");
         return sb.toString();
+    }
+
+    /** 设置卡片:标题 + 说明 + 自绘开关(轨道渐变淡入、滑块弹性位移、按压拉伸)。 */
+    private static String settingsCard(boolean parseOn) {
+        return "<div class='set' id='setParseRow'>"
+                + "<div class='setIco'><svg width='20' height='20' viewBox='0 0 24 24'>"
+                + "<circle cx='12' cy='12' r='8.4' fill='none' stroke='#fff' stroke-width='2.4'/>"
+                + "<circle cx='12' cy='12' r='3.4' fill='#fff'/></svg></div>"
+                + "<div class='setMain'><div class='setT'>实况解析</div>"
+                + "<div class='setD'>发送图片时显示「解析实况」按钮，把实况图合成视频发出</div></div>"
+                + "<div class='sw" + (parseOn ? " on" : "") + "' id='swParse' role='switch' tabindex='0'"
+                + " aria-checked='" + (parseOn ? "true" : "false") + "'>"
+                + "<div class='fill'></div><div class='knob'></div></div>"
+                + "</div>";
     }
 
     /** 卡片区:独立 App 只留项目源码(支持作者/联系我在 QQ 里更合适)。 */
@@ -355,6 +418,18 @@ public final class ModuleAboutPage {
                 + "if(t&&(Math.abs(t.clientX-sx)+Math.abs(t.clientY-sy))>14){clearTimeout(timer);timer=null;}});"
                 + "hero.addEventListener('contextmenu',function(e){e.preventDefault();});"
                 + "document.addEventListener('visibilitychange',function(){if(document.hidden)stopBuzz();});"
+                + "})();"
+                + "(function(){"
+                + "var row=document.getElementById('setParseRow');if(!row)return;"
+                + "var sw=document.getElementById('swParse');"
+                + "function paint(on){if(!sw)return;sw.classList.toggle('on',on);"
+                + "sw.setAttribute('aria-checked',on?'true':'false');}"
+                + "row.addEventListener('click',function(){"
+                + "var on=!(sw&&sw.classList.contains('on'));paint(on);"
+                + "try{if(window.LiveXPSettings)LiveXPSettings.setSendParse(on);}catch(e){}});"
+                + "if(sw){sw.addEventListener('touchstart',function(){sw.classList.add('press');},{passive:true});"
+                + "sw.addEventListener('touchend',function(){sw.classList.remove('press');});"
+                + "sw.addEventListener('touchcancel',function(){sw.classList.remove('press');});}"
                 + "})();"
                 + "</script>";
     }
