@@ -391,9 +391,38 @@ public final class LiveSendHook {
 
     /** 返回 true 表示已拦下原生点击,等转码完成后重放。 */
     private static boolean prepareGridSend(View sendView) {
+        return prepareGridSend(sendView, true);
+    }
+
+    private static boolean prepareGridSend(View sendView, boolean allowRetry) {
         scanVisibleGridCells(sendView.getRootView());
         java.util.List<String> paths = selectedGridPaths();
-        if (paths.isEmpty()) return false;
+        if (paths.isEmpty()) {
+            if (allowRetry) {
+                synchronized (gridSendRetries) {
+                    if (!Boolean.TRUE.equals(gridSendRetries.get(sendView))) {
+                        gridSendRetries.put(sendView, Boolean.TRUE);
+                        Log.i("网格发送:选中态尚未完成,延迟补读");
+                        sendView.postDelayed(() -> {
+                            synchronized (gridSendRetries) {
+                                gridSendRetries.remove(sendView);
+                            }
+                            if (!sendView.isAttachedToWindow()) return;
+                            if (!prepareGridSend(sendView, false)) {
+                                replayGridClick = true;
+                                try {
+                                    sendView.performClick();
+                                } finally {
+                                    replayGridClick = false;
+                                }
+                            }
+                        }, 220L);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
         for (String path : paths) {
             if (!armedPaths.contains(path)) return false;
         }
@@ -1650,8 +1679,27 @@ public final class LiveSendHook {
     }
 
     private static void toggle(TextView btn) {
+        toggle(btn, true);
+    }
+
+    private static void toggle(TextView btn, boolean allowRetry) {
         scanVisibleGridCells(btn.getRootView());
         java.util.List<String> selected = selectedGridPaths();
+        if (selected.isEmpty() && currentPath == null && allowRetry) {
+            synchronized (gridSelectionRetries) {
+                if (!Boolean.TRUE.equals(gridSelectionRetries.get(btn))) {
+                    gridSelectionRetries.put(btn, Boolean.TRUE);
+                    Log.i("实况转MP4:选中态尚未完成,延迟补读");
+                    btn.postDelayed(() -> {
+                        synchronized (gridSelectionRetries) {
+                            gridSelectionRetries.remove(btn);
+                        }
+                        toggle(btn, false);
+                    }, 220L);
+                    return;
+                }
+            }
+        }
         if (!selected.isEmpty()) {
             currentPath = null;
             boolean allArmed = true;
@@ -2142,6 +2190,12 @@ public final class LiveSendHook {
     private static final java.util.WeakHashMap<View, Long> lastGridTryPerRoot = new java.util.WeakHashMap<>();
     /** 按钮所在预览窗口可能与全屏网格是两个根,保留当前可见的网格根供点击时补扫。 */
     private static final java.util.WeakHashMap<View, Boolean> knownGridRoots = new java.util.WeakHashMap<>();
+    /** 全屏网格选中态刚完成布局时,按钮点击只延迟一次读取,避免误报未勾选。 */
+    private static final java.util.WeakHashMap<View, Boolean> gridSelectionRetries =
+            new java.util.WeakHashMap<>();
+    /** 发送按钮点击的短暂补读状态,补读失败才放回 QQ 原生发送。 */
+    private static final java.util.WeakHashMap<View, Boolean> gridSendRetries =
+            new java.util.WeakHashMap<>();
 
     private static void ensureGridAdapter(View root) {
         if (!(root instanceof ViewGroup)) return;
@@ -2192,6 +2246,7 @@ public final class LiveSendHook {
     /** 数据项带路径的 adapter 才是媒体网格;数据未到(面板刚开)返回 false 等重试。 */
     private static boolean hookGridAdapter(Object adapter) {
         Class<?> c = adapter.getClass();
+        gridAdapterRef = new java.lang.ref.WeakReference<>(adapter);
         java.util.List<Object> data = adapterListOf(adapter);
         if (data == null || data.isEmpty()) {
             if (data == null && gridHooked.add(c)) {
@@ -2205,14 +2260,15 @@ public final class LiveSendHook {
             return false;
         }
         if (!gridHooked.add(c)) return true;
-        gridAdapterRef = new java.lang.ref.WeakReference<>(adapter);
         int n = 0;
         for (Class<?> k = c; k != null && k != Object.class && n == 0; k = k.getSuperclass()) {
             for (Method m : k.getDeclaredMethods()) {
-                if (!m.getName().equals("onBindViewHolder")) continue;
-                if (!hookedMethods.add(m)) continue;
+                if (!m.getName().equals("onBindViewHolder")
+                        || Modifier.isAbstract(m.getModifiers())) continue;
+                if (hookedMethods.contains(m)) continue;
                 try {
                     XposedBridge.hookMethod(m, BIND_HOOK);
+                    hookedMethods.add(m);
                     n++;
                 } catch (Throwable t) {
                     Log.i("网格 onBind 挂载失败: " + t);
@@ -2228,10 +2284,12 @@ public final class LiveSendHook {
         int n = 0;
         for (Class<?> k = c; k != null && k != Object.class && n == 0; k = k.getSuperclass()) {
             for (Method m : k.getDeclaredMethods()) {
-                if (!m.getName().equals("onBindViewHolder")) continue;
-                if (!hookedMethods.add(m)) continue;
+                if (!m.getName().equals("onBindViewHolder")
+                        || Modifier.isAbstract(m.getModifiers())) continue;
+                if (hookedMethods.contains(m)) continue;
                 try {
                     XposedBridge.hookMethod(m, BIND_HOOK);
+                    hookedMethods.add(m);
                     n++;
                 } catch (Throwable t) {
                     Log.i("网格 onBind 挂载失败: " + t);
