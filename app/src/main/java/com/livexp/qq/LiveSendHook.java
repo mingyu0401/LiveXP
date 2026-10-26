@@ -298,7 +298,7 @@ public final class LiveSendHook {
     private static void autoArmIfNeeded(String path) {
         if (path == null) return;
         android.content.Context ctx = HookEntry.appCtx;
-        if (ctx == null || !LiveSettings.sendParseEnabled(ctx)) return;
+        if (ctx == null || !LiveSettings.parsingEnabled(ctx)) return;
         autoQueue(path);
     }
 
@@ -308,6 +308,8 @@ public final class LiveSendHook {
     /** 面板打开即自动排队转码(预热,发送是否替换由 armed 决定)。 */
     private static void autoQueue(String path) {
         if (path == null) return;
+        android.content.Context ctx = HookEntry.appCtx;
+        if (ctx != null && !LiveSettings.parsingEnabled(ctx)) return;
         Boolean live = liveVerdict.get(path);
         if (live == null) {
             IO.execute(() -> {
@@ -356,21 +358,104 @@ public final class LiveSendHook {
             protected void beforeHookedMethod(MethodHookParam param) {
                 if (replayGridClick || !(param.thisObject instanceof View)) return;
                 View view = (View) param.thisObject;
-                if (!isSendButton(view)) return;
-                try {
-                    if (prepareGridSend(view)) param.setResult(true);
-                } catch (Throwable t) {
-                    Log.i("网格发送拦截失败,原样发送: " + t);
+                if (isSendButton(view)) {
+                    try {
+                        if (prepareGridSend(view)) param.setResult(true);
+                    } catch (Throwable t) {
+                        Log.i("网格发送拦截失败,原样发送: " + t);
+                    }
+                    return;
                 }
+                rememberGridClickBefore(view);
+            }
+
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                if (replayGridClick || !(param.thisObject instanceof View)) return;
+                View view = (View) param.thisObject;
+                if (!isSendButton(view)) rememberGridClickAfter(view);
             }
         };
         try {
             XposedBridge.hookAllMethods(View.class, "performClick", clickHook);
             XposedBridge.hookAllMethods(View.class, "callOnClick", clickHook);
+            XC_MethodHook stateHook = new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (replayGridClick || !(param.thisObject instanceof View)
+                            || param.args == null || param.args.length == 0
+                            || !(param.args[0] instanceof Boolean)) return;
+                    trackGridViewState((View) param.thisObject, (Boolean) param.args[0]);
+                }
+            };
+            XposedBridge.hookAllMethods(View.class, "setSelected", stateHook);
+            XposedBridge.hookAllMethods(View.class, "setActivated", stateHook);
             Log.i("网格发送按钮点击钩子已挂");
         } catch (Throwable t) {
             Log.i("网格发送按钮点击钩子失败: " + t);
         }
+    }
+
+    private static void trackGridViewState(View view, boolean selected) {
+        View cell = gridCellForView(view);
+        if (cell == null) return;
+        String path;
+        synchronized (cellPaths) {
+            path = cellPaths.get(cell);
+        }
+        if (path == null) return;
+        if (selected) manualGridSelected.put(path, Boolean.TRUE);
+        else if (!isCellSelected(cell)) manualGridSelected.remove(path);
+    }
+
+    private static void rememberGridClickBefore(View view) {
+        View cell = gridCellForView(view);
+        if (cell == null) return;
+        String path;
+        synchronized (cellPaths) {
+            path = cellPaths.get(cell);
+        }
+        if (path == null) return;
+        boolean was = isCellSelected(cell) || Boolean.TRUE.equals(manualGridSelected.get(path));
+        synchronized (pendingGridClicks) {
+            pendingGridClicks.put(view, was);
+        }
+    }
+
+    private static void rememberGridClickAfter(View view) {
+        final Boolean was;
+        synchronized (pendingGridClicks) {
+            was = pendingGridClicks.remove(view);
+        }
+        if (was == null) return;
+        view.postDelayed(() -> {
+            View cell = gridCellForView(view);
+            if (cell == null) return;
+            String path;
+            synchronized (cellPaths) {
+                path = cellPaths.get(cell);
+            }
+            if (path == null) return;
+            boolean now = isCellSelected(cell);
+            boolean selected = now || !was;
+            if (selected) manualGridSelected.put(path, Boolean.TRUE);
+            else manualGridSelected.remove(path);
+            Log.i("网格点击选择同步: path=" + path + " before=" + was + " viewNow=" + now
+                    + " selected=" + selected);
+        }, 80L);
+    }
+
+    private static View gridCellForView(View view) {
+        synchronized (cellPaths) {
+            for (View cell : cellPaths.keySet()) {
+                if (cell == null || view == null) continue;
+                for (View p = view; p != null; p = p.getParent() instanceof View
+                        ? (View) p.getParent() : null) {
+                    if (p == cell) return cell;
+                }
+            }
+        }
+        return null;
     }
 
     private static boolean isSendButton(View view) {
@@ -497,10 +582,11 @@ public final class LiveSendHook {
                 applyVideoFields(copy, j.out);
                 list.set(i, copy);
                 pendingGridRestores.put(j.path, new GridRestore(list, i, item, copy));
+                j.autoSend = true;
+                j.autoItem = copy;
+                j.sent = true;
                 LiveSendMarks.remember(j.out.md5, j.out.storePath);
                 scheduleDelete(j.out);
-                armedPaths.remove(j.path);
-                jobs.remove(j.path);
                 return true;
             }
         }
@@ -541,7 +627,7 @@ public final class LiveSendHook {
             if (restore == null) continue;
             try {
                 if (restore.index >= 0 && restore.index < restore.list.size()
-                        && restore.list.get(restore.index) == restore.replacement) {
+                        && restore.list.get(restore.index) != restore.original) {
                     restore.list.set(restore.index, restore.original);
                 }
             } catch (Throwable t) {
@@ -552,7 +638,7 @@ public final class LiveSendHook {
 
     private static void restoreGridItemsLater(View sendView, java.util.List<String> paths) {
         if (sendView == null) return;
-        sendView.postDelayed(() -> restoreGridItems(paths), 350L);
+        sendView.postDelayed(() -> restoreGridItems(paths), 3000L);
     }
 
     private static void replayGridClickAfter(View sendView, String path, View preferredCell,
@@ -763,6 +849,7 @@ public final class LiveSendHook {
                 scheduleDelete(j.out);
                 anySwapped = true;
             }
+            restoreGridItems(java.util.Collections.singletonList(j.path));
             j.autoSend = false;
             j.pending = null;
             armedPaths.remove(j.path);
@@ -1519,7 +1606,7 @@ public final class LiveSendHook {
     }
 
     private static void injectInto(Context ctx, TextView anchor, String from) {
-        if (!LiveSettings.sendParseEnabled(ctx)) return;
+        if (!LiveSettings.parsingEnabled(ctx) || !LiveSettings.sendParseEnabled(ctx)) return;
         final ViewGroup bar = anchor.getParent() instanceof ViewGroup
                 ? (ViewGroup) anchor.getParent() : null;
         if (bar == null) return;
@@ -1892,6 +1979,11 @@ public final class LiveSendHook {
                 cellPicked++;
             }
         }
+        synchronized (manualGridSelected) {
+            for (Map.Entry<String, Boolean> e : manualGridSelected.entrySet()) {
+                if (Boolean.TRUE.equals(e.getValue())) hits.add(e.getKey());
+            }
+        }
         Log.i("网格按钮: 总数=" + (list == null ? "?" : list.size()) + " 带路径=" + withPath
                 + " 数据勾选=" + picked + " anySelected=" + anySelected + " 视图勾选=" + cellPicked
                 + " 实际选中=" + hits.size());
@@ -2091,9 +2183,46 @@ public final class LiveSendHook {
         });
     }
 
-    /** 新选择会话默认不启用“实况转MP4”;保留自动预热产物,避免重复合成。 */
+    /** 兼容旧调用名:关闭解析总开关时停止识别并清理全部模块状态。 */
+    static void onParsingDisabled() {
+        onParseDisabled();
+    }
+
+    /** 关闭 MP4 发送开关时撤下按钮并取消发送替换,但不影响 QQ 原生能力和解析预热。 */
+    static void onSendDisabled() {
+        MAIN.post(() -> {
+            try {
+                synchronized (buttons) {
+                    for (TextView btn : new java.util.ArrayList<>(buttons.values())) {
+                        if (btn == null) continue;
+                        ViewGroup parent = btn.getParent() instanceof ViewGroup
+                                ? (ViewGroup) btn.getParent() : null;
+                        if (parent != null) parent.removeView(btn);
+                    }
+                    buttons.clear();
+                }
+                armedPaths.clear();
+                for (Job j : jobs.values()) {
+                    j.checked = false;
+                    j.sent = false;
+                    j.autoSend = false;
+                    j.autoItem = null;
+                    if (j.pending != null) releasePending(j);
+                    if (j.deferred != null) releaseDeferred(j);
+                }
+                Log.i("setting off: 已撤下实况转MP4发送按钮");
+            } catch (Throwable t) {
+                Log.i("remove send buttons failed: " + t);
+            }
+        });
+    }
+
     private static void resetSelectionSessionState() {
         armedPaths.clear();
+        manualGridSelected.clear();
+        synchronized (pendingGridClicks) {
+            pendingGridClicks.clear();
+        }
         currentPath = null;
         currentItem = null;
         for (Job j : jobs.values()) {
@@ -2240,6 +2369,9 @@ public final class LiveSendHook {
     /** 发送按钮点击的短暂补读状态,补读失败才放回 QQ 原生发送。 */
     private static final java.util.WeakHashMap<View, Boolean> gridSendRetries =
             new java.util.WeakHashMap<>();
+    /** QQ 某些全屏版本只更新内部选择集合,不更新 cell 的 selected/checked 属性。 */
+    private static final Map<String, Boolean> manualGridSelected = new ConcurrentHashMap<>();
+    private static final Map<View, Boolean> pendingGridClicks = new WeakHashMap<>();
 
     private static void ensureGridAdapter(View root) {
         if (!(root instanceof ViewGroup)) return;
