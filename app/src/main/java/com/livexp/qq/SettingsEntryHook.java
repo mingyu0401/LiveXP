@@ -169,8 +169,10 @@ public final class SettingsEntryHook {
         // (如 com.tencent.mobileqq.account.provider.AccountManagerConfigProvider),
         // 不按包名限定会到处多出一个「LiveXP 模块」按钮。
         String declaring = param.method.getDeclaringClass().getName();
-        if (!declaring.startsWith(PROVIDER_PKG)) {
-            Log.i("skip non-main settings list: " + declaring);
+        Object receiver = param.thisObject;
+        String actual = receiver == null ? declaring : receiver.getClass().getName();
+        if (!declaring.startsWith(PROVIDER_PKG) && !actual.startsWith(PROVIDER_PKG)) {
+            Log.i("skip non-main settings list: declaring=" + declaring + " actual=" + actual);
             return;
         }
 
