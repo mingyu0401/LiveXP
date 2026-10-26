@@ -54,6 +54,17 @@ public final class ModuleAboutPage {
         }
 
         @android.webkit.JavascriptInterface
+        public boolean getParsing() {
+            return LiveSettings.parsingEnabled(ctx);
+        }
+
+        @android.webkit.JavascriptInterface
+        public void setParsing(boolean on) {
+            LiveSettings.setParsingEnabled(ctx, on);
+            Haptics.tick(ctx);
+        }
+
+        @android.webkit.JavascriptInterface
         public boolean getSendParse() {
             return LiveSettings.sendParseEnabled(ctx);
         }
@@ -235,12 +246,14 @@ public final class ModuleAboutPage {
         StringBuilder ver = new StringBuilder("v").append(BuildConfig.VERSION_NAME);
         ver.append(" · for QQ").append(qq == null ? "" : " " + qq).append(" (NT)");
         ver.append(" · ").append(lsp);
-        return buildHtml(dark, false, true, LiveSettings.sendParseEnabled(ctx), ver.toString());
+        return buildHtml(dark, false, true, LiveSettings.parsingEnabled(ctx),
+                LiveSettings.sendParseEnabled(ctx), ver.toString());
     }
 
     /** 独立 App:显示激活状态与 LSPosed 版本;未激活时停掉全部炫彩。 */
     public static String appHtml(Context ctx, boolean dark, boolean active, String verText) {
-        return buildHtml(dark, true, active, LiveSettings.sendParseEnabled(ctx), verText);
+        return buildHtml(dark, true, active, LiveSettings.parsingEnabled(ctx),
+                LiveSettings.sendParseEnabled(ctx), verText);
     }
 
     public static Dialog showDialog(Context ctx, Actions actions) {
@@ -277,7 +290,7 @@ public final class ModuleAboutPage {
     }
 
     private static String buildHtml(boolean dark, boolean appMode, boolean active,
-                                    boolean parseOn, String verText) {
+                                    boolean parseOn, boolean sendOn, String verText) {
         String bg = dark
                 ? "radial-gradient(1200px 600px at 50% -10%,#16202e 0%,#0d1117 60%),#0d1117"
                 : "radial-gradient(1200px 600px at 50% -10%,#eaeef2 0%,#f6f8fa 60%),#f6f8fa";
@@ -410,7 +423,7 @@ public final class ModuleAboutPage {
                 .append("<h1 class='rainbow' id='stateTitle'>").append(title).append("</h1>")
                 .append("<div class='ver' id='verLine'>").append(verText).append("</div>")
                 .append("<div class='desc'>").append(descHtml).append("</div>")
-                .append(appMode ? "" : settingsCard(parseOn))
+                .append(appMode ? "" : settingsCard(parseOn, sendOn))
                 .append("<div class='cards'>").append(cards(appMode)).append("</div>")
                 .append(thresholdSection())
                 .append(credits(sub, cardBorder, appMode))
@@ -420,18 +433,25 @@ public final class ModuleAboutPage {
         return sb.toString();
     }
 
-    /** 设置卡片:标题 + 说明 + 自绘开关(轨道渐变淡入、滑块弹性位移、按压拉伸)。 */
-    private static String settingsCard(boolean parseOn) {
+    /** 设置卡片:先控制实况识别,再控制用户主动的视频发送替换。 */
+    private static String settingsCard(boolean parseOn, boolean sendOn) {
         return "<div class='set' id='setParseRow'>"
                 + "<div class='setIco'><svg width='20' height='20' viewBox='0 0 24 24'>"
                 + "<circle cx='12' cy='12' r='8.4' fill='none' stroke='#fff' stroke-width='2.4'/>"
                 + "<circle cx='12' cy='12' r='3.4' fill='#fff'/></svg></div>"
-                + "<div class='setMain'><div class='setT'>解析实况图片</div>"
-                + "<div class='setD'>开启后识别实况图片并提供转 MP4 发送功能；关闭不影响 QQ 原生图片发送和查看</div></div>"
+                + "<div class='setMain'><div class='setT'>实况图片解析</div>"
+                + "<div class='setD'>开启后识别实况图片并预热解析；关闭后停止模块识别，但不影响 QQ 原生图片发送、查看和播放</div></div>"
                 + "<div class='sw" + (parseOn ? " on" : "") + "' id='swParse' role='switch' tabindex='0'"
                 + " aria-checked='" + (parseOn ? "true" : "false") + "'>"
-                + "<div class='fill'></div><div class='knob'></div></div>"
-                + "</div>";
+                + "<div class='fill'></div><div class='knob'></div></div></div>"
+                + "<div class='set' id='setSendRow'>"
+                + "<div class='setIco'><svg width='20' height='20' viewBox='0 0 24 24'>"
+                + "<path d='M4 12h12M12 6l6 6-6 6' fill='none' stroke='#fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/></svg></div>"
+                + "<div class='setMain'><div class='setT'>实况转MP4发送</div>"
+                + "<div class='setD'>开启后仅在你主动点击“实况转MP4”时，用对应 MP4 替换发送；关闭后始终按原图发送</div></div>"
+                + "<div class='sw" + (sendOn ? " on" : "") + "' id='swSend' role='switch' tabindex='0'"
+                + " aria-checked='" + (sendOn ? "true" : "false") + "'>"
+                + "<div class='fill'></div><div class='knob'></div></div></div>";
     }
 
     /** 卡片区:独立 App 只留项目源码(支持作者/联系我在 QQ 里更合适)。 */
@@ -533,17 +553,21 @@ public final class ModuleAboutPage {
                 + "document.addEventListener('visibilitychange',function(){if(document.hidden)stopBuzz();});"
                 + "})();"
                 + "(function(){"
-                + "var row=document.getElementById('setParseRow');if(!row)return;"
-                + "var sw=document.getElementById('swParse');"
-                + "function paint(on){if(!sw)return;sw.classList.toggle('on',on);"
-                + "sw.setAttribute('aria-checked',on?'true':'false');}"
-                + "row.addEventListener('click',function(){"
-                + "var on=!(sw&&sw.classList.contains('on'));if(!on){var keep=window.confirm('要保留\\u201c解析实况图片\\u201d吗？\\n关闭后不会影响 QQ 原生图片发送和查看，但实况识别与转 MP4 功能将停用。');if(keep){paint(true);return;}}paint(on);"
-                + "try{if(window.LiveXPSettings)LiveXPSettings.setSendParse(on);}catch(e){}});"
-                + "if(sw){sw.addEventListener('touchstart',function(){sw.classList.add('press');},{passive:true});"
-                + "sw.addEventListener('touchend',function(){sw.classList.remove('press');});"
-                + "sw.addEventListener('touchcancel',function(){sw.classList.remove('press');});}"
-                + "})();"
+                 + "var parseRow=document.getElementById('setParseRow'),parseSw=document.getElementById('swParse');"
+                 + "var sendRow=document.getElementById('setSendRow'),sendSw=document.getElementById('swSend');"
+                 + "function paint(sw,on){if(!sw)return;sw.classList.toggle('on',on);"
+                 + "sw.setAttribute('aria-checked',on?'true':'false');}"
+                 + "if(parseRow){parseRow.addEventListener('click',function(){"
+                 + "var on=!(parseSw&&parseSw.classList.contains('on'));"
+                 + "if(!on){var keep=window.confirm('实况图片很特别,要不要留下它？\\n关闭后 QQ 原生图片发送、查看和播放仍然正常,但 LiveXP 将不再识别实况图片,也不能为它预热 MP4。');if(keep){paint(parseSw,true);return;}}"
+                 + "paint(parseSw,on);try{if(window.LiveXPSettings)LiveXPSettings.setParsing(on);}catch(e){}});}"
+                 + "if(sendRow){sendRow.addEventListener('click',function(){"
+                 + "var on=!(sendSw&&sendSw.classList.contains('on'));paint(sendSw,on);"
+                 + "try{if(window.LiveXPSettings)LiveXPSettings.setSendParse(on);}catch(e){}});}"
+                 + "function press(sw){if(sw)sw.classList.add('press');}function unpress(sw){if(sw)sw.classList.remove('press');}"
+                 + "[parseSw,sendSw].forEach(function(sw){if(!sw)return;sw.addEventListener('touchstart',function(){press(sw);},{passive:true});"
+                 + "sw.addEventListener('touchend',function(){unpress(sw);});sw.addEventListener('touchcancel',function(){unpress(sw);});});"
+                 + "})();"
                 + "</script>";
     }
 
