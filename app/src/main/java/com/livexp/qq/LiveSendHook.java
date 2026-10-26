@@ -472,7 +472,10 @@ public final class LiveSendHook {
             return true;
         }
         for (Job j : jobsToSend) {
-            if (!swapGridToVideo(j)) return false;
+            if (!swapGridToVideo(j)) {
+                restoreGridItems(paths);
+                return false;
+            }
         }
         Log.i("网格发送按钮:媒体项换成合成视频 count=" + jobsToSend.size());
         replayGridClickAfter(sendView, paths, firstCell, firstPosition, positions);
@@ -486,7 +489,14 @@ public final class LiveSendHook {
             for (int i = 0; i < list.size(); i++) {
                 Object item = list.get(i);
                 if (item == null || !j.path.equals(pathOfLoose(item))) continue;
-                applyVideoFields(item, j.out);
+                Object copy = copyOf(item);
+                if (copy == null) {
+                    Log.i("网格发送按钮:无法复制发送项,按原图发送 path=" + j.path);
+                    return false;
+                }
+                applyVideoFields(copy, j.out);
+                list.set(i, copy);
+                pendingGridRestores.put(j.path, new GridRestore(list, i, item, copy));
                 LiveSendMarks.remember(j.out.md5, j.out.storePath);
                 scheduleDelete(j.out);
                 armedPaths.remove(j.path);
@@ -499,16 +509,50 @@ public final class LiveSendHook {
                 if (!j.path.equals(e.getValue())) continue;
                 Object item = cellItems.get(e.getKey());
                 if (item == null) continue;
-                applyVideoFields(item, j.out);
-                LiveSendMarks.remember(j.out.md5, j.out.storePath);
-                scheduleDelete(j.out);
-                armedPaths.remove(j.path);
-                jobs.remove(j.path);
-                return true;
+                Log.i("网格发送按钮:发送列表未找到 cell 对象,按原图发送 path=" + j.path);
+                return false;
             }
         }
         Log.i("网格发送按钮:未找到发送项 path=" + j.path);
         return false;
+    }
+
+    private static final class GridRestore {
+        final java.util.List<Object> list;
+        final int index;
+        final Object original;
+        final Object replacement;
+
+        GridRestore(java.util.List<Object> list, int index, Object original, Object replacement) {
+            this.list = list;
+            this.index = index;
+            this.original = original;
+            this.replacement = replacement;
+        }
+    }
+
+    private static final Map<String, GridRestore> pendingGridRestores =
+            new ConcurrentHashMap<>();
+
+    private static void restoreGridItems(java.util.List<String> paths) {
+        if (paths == null) return;
+        for (String path : paths) {
+            GridRestore restore = pendingGridRestores.remove(path);
+            if (restore == null) continue;
+            try {
+                if (restore.index >= 0 && restore.index < restore.list.size()
+                        && restore.list.get(restore.index) == restore.replacement) {
+                    restore.list.set(restore.index, restore.original);
+                }
+            } catch (Throwable t) {
+                Log.i("网格发送后恢复原图失败 path=" + path + ": " + t);
+            }
+        }
+    }
+
+    private static void restoreGridItemsLater(View sendView, java.util.List<String> paths) {
+        if (sendView == null) return;
+        sendView.postDelayed(() -> restoreGridItems(paths), 350L);
     }
 
     private static void replayGridClickAfter(View sendView, String path, View preferredCell,
@@ -542,6 +586,7 @@ public final class LiveSendHook {
                     sendView.performClick();
                 } finally {
                     replayGridClick = false;
+                    restoreGridItemsLater(sendView, paths);
                 }
             }, 250L);
         }, 500L);
@@ -1123,10 +1168,9 @@ public final class LiveSendHook {
             list.set(at, copy);
             return true;
         }
-        // 不在发送列表里(极少数情况):只能就地改,保证发出去的是视频
-        Log.i("send: 媒体项不在发送列表,就地改写");
-        applyVideoFields(item, out);
-        return true;
+        // 不在发送列表里时无法安全替换:按原图发送,绝不就地修改相册共享对象。
+        Log.i("send: 媒体项不在发送列表,按原图发送");
+        return false;
     }
 
     /** 深拷贝一个 LocalMediaInfo:优先走 Parcel,失败再按字段复制。 */
