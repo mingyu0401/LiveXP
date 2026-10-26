@@ -84,6 +84,8 @@ public final class LiveSendHook {
     private static final Map<View, TextView> buttons = new WeakHashMap<>();
     private static final Map<TextView, View> buttonRoots = new WeakHashMap<>();
     private static final Map<TextView, android.view.WindowManager> overlayWindows = new WeakHashMap<>();
+    /** 上一次选择会话的底栏;底栏换新即视为重新打开选择界面,清除按钮的选中态。 */
+    private static java.lang.ref.WeakReference<View> lastSelectionBar;
     /** 底栏 View → 看门人:QQ 会重建底栏子 View,按钮被抹掉时要重新挂回去。 */
     private static final Map<View, android.view.ViewTreeObserver.OnGlobalLayoutListener> watchers =
             new WeakHashMap<>();
@@ -311,7 +313,10 @@ public final class LiveSendHook {
             IO.execute(() -> {
                 boolean l = LivePhotoDetector.isLiveFile(path);
                 liveVerdict.put(path, l);
-                if (l) MAIN.post(() -> autoQueue(path));
+                if (l) MAIN.post(() -> {
+                    autoQueue(path);
+                    refreshButtons();
+                });
             });
             return;
         }
@@ -1445,6 +1450,11 @@ public final class LiveSendHook {
         final ViewGroup bar = anchor.getParent() instanceof ViewGroup
                 ? (ViewGroup) anchor.getParent() : null;
         if (bar == null) return;
+        View previousBar = lastSelectionBar == null ? null : lastSelectionBar.get();
+        if (previousBar != bar) {
+            resetSelectionSessionState();
+            lastSelectionBar = new java.lang.ref.WeakReference<View>(bar);
+        }
         synchronized (buttons) {
             TextView existing = buttons.get(bar);
             if (existing != null && existing.getParent() != null) return;
@@ -1989,6 +1999,20 @@ public final class LiveSendHook {
         });
     }
 
+    /** 新选择会话默认不启用“实况转MP4”;保留自动预热产物,避免重复合成。 */
+    private static void resetSelectionSessionState() {
+        armedPaths.clear();
+        currentPath = null;
+        currentItem = null;
+        for (Job j : jobs.values()) {
+            j.checked = false;
+            j.sent = false;
+            j.autoSend = false;
+            j.autoItem = null;
+        }
+        Log.i("实况转MP4: 新选择会话,默认取消按钮选中态");
+    }
+
     private static void style(TextView btn) {
         boolean on;
         if (currentPath != null) {
@@ -2010,6 +2034,23 @@ public final class LiveSendHook {
         }
     }
 
+    /** 网格选择态按钮文案:已选实况数/已选媒体总数,不受 armed 状态影响。 */
+    private static String gridSelectionLabel() {
+        java.util.List<String> selected = selectedGridPaths();
+        if (selected.isEmpty()) return "实况转MP4";
+        int live = 0;
+        for (String path : selected) {
+            Boolean verdict = liveVerdict.get(path);
+            Job j = jobs.get(path);
+            if (Boolean.TRUE.equals(verdict)
+                    || (verdict == null && j != null
+                    && (j.autoQueued || j.checked || j.status == ST_PARSING || j.status == ST_READY))) {
+                live++;
+            }
+        }
+        return "实况转MP4(" + live + "/" + selected.size() + ")";
+    }
+
     private static void label(TextView btn) {
         if (currentPath != null) {
             Job j = jobs.get(currentPath);
@@ -2020,29 +2061,7 @@ public final class LiveSendHook {
             btn.setText("实况转MP4");
             return;
         }
-        // 网格态:按 armed 集合显示总体进度
-        if (armedPaths.isEmpty()) {
-            btn.setText("实况转MP4");
-            return;
-        }
-        int total = 0, ready = 0, parsing = 0, failed = 0;
-        for (String p : armedPaths) {
-            Job j = jobs.get(p);
-            if (j == null) continue;
-            total++;
-            if (j.status == ST_READY) ready++;
-            else if (j.status == ST_PARSING) parsing++;
-            else if (j.status == ST_FAILED || j.status == ST_NOT_LIVE) failed++;
-        }
-        if (total == 0) {
-            btn.setText("实况转MP4");
-        } else if (parsing > 0) {
-            btn.setText("转换中(" + ready + "/" + total + ")");
-        } else if (failed > 0) {
-            btn.setText("部分失败(" + ready + "/" + total + ")");
-        } else {
-            btn.setText("转换完成(" + ready + "/" + total + ")");
-        }
+        btn.setText(gridSelectionLabel());
     }
 
     /** 单张图的按钮文案。 */
