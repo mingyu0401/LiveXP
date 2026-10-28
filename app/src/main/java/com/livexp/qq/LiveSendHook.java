@@ -1637,16 +1637,46 @@ public final class LiveSendHook {
     }
 
     /** onSendClick 实际发送的 List<LocalMediaInfo>(getPhotoCommonData().h()),拿不到返回 null。 */
+    @SuppressWarnings("unchecked")
     private static java.util.List<Object> sendListOf(Object customization) {
         try {
             Object pc = XposedHelpers.callMethod(customization, "getPhotoCommonData");
             if (pc == null) return null;
-            Object list = XposedHelpers.callMethod(pc, "h");
-            return list instanceof java.util.List ? (java.util.List<Object>) list : null;
+            // h() 是当前版本的方法名;混淆后可能换名,再按形态找一个装媒体的 List 兜底。
+            for (String name : new String[]{"h", "getSelectedList", "j", "i", "g"}) {
+                try {
+                    Object v = XposedHelpers.callMethod(pc, name);
+                    if (v instanceof java.util.List && hasMedia((java.util.List<Object>) v)) {
+                        return (java.util.List<Object>) v;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            return mediaListIn(pc);
         } catch (Throwable t) {
             Log.i("send list unavailable: " + t);
             return null;
         }
+    }
+
+    /** 在 PhotoCommonData 的字段里找装媒体项的 List(仅接受能解析出路径的列表)。 */
+    @SuppressWarnings("unchecked")
+    private static java.util.List<Object> mediaListIn(Object owner) {
+        for (Class<?> c = owner.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Field f : c.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers())) continue;
+                if (!java.util.List.class.isAssignableFrom(f.getType())) continue;
+                try {
+                    f.setAccessible(true);
+                    Object v = f.get(owner);
+                    if (v instanceof java.util.List && hasMedia((java.util.List<Object>) v)) {
+                        return (java.util.List<Object>) v;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return null;
     }
 
     /** 当前 customization 自己的发送列表;没有可用实例时返回 null。 */
