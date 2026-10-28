@@ -112,6 +112,10 @@ public final class LiveSendHook {
         boolean sent;
         /** 用户点了发送,等转码完成后自动发出。 */
         boolean autoSend;
+        /** 网格发送时的选中顺序,QQ 回传重建媒体对象时用于兜底匹配。 */
+        int gridOrder = -1;
+        /** 本次发送批次号:兜底匹配只认同一批,避免受上一次遗留任务影响。 */
+        int gridBatch = -1;
         /** 面板打开后的自动排队转码(与用户点击无关,只是预热产物)。 */
         boolean autoQueued;
         Object autoItem;
@@ -511,11 +515,15 @@ public final class LiveSendHook {
         for (String path : paths) {
             if (!armedPaths.contains(path)) return false;
         }
+        int gridOrder = 0;
+        int gridBatch = nextGridBatch();
         java.util.List<Job> jobsToSend = new java.util.ArrayList<>();
         boolean waiting = false;
         for (String path : paths) {
             Job j = jobs.get(path);
             if (j == null || !j.checked) return false;
+            j.gridOrder = gridOrder++;
+            j.gridBatch = gridBatch;
             jobsToSend.add(j);
             boolean ready = j.status == ST_READY && j.out != null
                     && j.out.file != null && j.out.file.isFile();
@@ -563,13 +571,20 @@ public final class LiveSendHook {
             }
         }
         Log.i("网格发送按钮:媒体项换成合成视频 count=" + jobsToSend.size());
-        replayGridClickAfter(sendView, paths, firstCell, firstPosition, positions);
-        return true;
+        // 发送列表已同步换成视频副本:让这次原生点击继续走完,不再重放。
+        // 重放会额外触发一次发送,QQ 便会同时发出原图与视频。
+        return false;
     }
 
+    /**
+     * 把这条媒体换成合成视频。
+     * 半屏(PhotoPanelAdapter)的 adapter 数据表不一定含当前选中项,此时改为
+     * 直接就地改写 cell 上拿到的媒体对象——QQ 发送时读的就是这个对象。
+     * 原字段先快照,结果回传后再还原,相册不会长期显示成视频。
+     */
     private static boolean swapGridToVideo(Job j) {
-        java.util.List<Object> list = gridDataList();
         if (j.out == null || j.out.storePath == null) return false;
+        java.util.List<Object> list = gridDataList();
         if (list != null) {
             for (int i = 0; i < list.size(); i++) {
                 Object item = list.get(i);
@@ -590,13 +605,26 @@ public final class LiveSendHook {
                 return true;
             }
         }
+        // 列表里找不到:用 cell 上的媒体对象就地改写(半屏相册的常见情况)。
         synchronized (cellPaths) {
             for (Map.Entry<View, String> e : cellPaths.entrySet()) {
                 if (!j.path.equals(e.getValue())) continue;
                 Object item = cellItems.get(e.getKey());
-                if (item == null) continue;
-                Log.i("网格发送按钮:发送列表未找到 cell 对象,按原图发送 path=" + j.path);
-                return false;
+                if (item == null || pathOf(item) == null) continue;
+                Object snapshot = copyOf(item);
+                if (snapshot == null) {
+                    Log.i("网格发送按钮:无法备份原图,按原图发送 path=" + j.path);
+                    return false;
+                }
+                applyVideoFields(item, j.out);
+                pendingGridRestores.put(j.path, new GridRestore(null, -1, item, snapshot));
+                j.autoSend = true;
+                j.autoItem = item;
+                j.sent = true;
+                LiveSendMarks.remember(j.out.md5, j.out.storePath);
+                scheduleDelete(j.out);
+                Log.i("网格发送按钮:cell 媒体对象就地换成视频 path=" + j.path);
+                return true;
             }
         }
         Log.i("网格发送按钮:未找到发送项 path=" + j.path);
@@ -626,6 +654,11 @@ public final class LiveSendHook {
             GridRestore restore = pendingGridRestores.remove(path);
             if (restore == null) continue;
             try {
+                if (restore.list == null) {
+                    // 就地改写分支:把原图字段写回同一个对象,相册恢复原样。
+                    copyFields(restore.original, restore.replacement);
+                    continue;
+                }
                 if (restore.index >= 0 && restore.index < restore.list.size()
                         && restore.list.get(restore.index) != restore.original) {
                     restore.list.set(restore.index, restore.original);
@@ -636,9 +669,25 @@ public final class LiveSendHook {
         }
     }
 
+    /** 把 source 的非静态字段逐项写回 target,用于还原被就地改写的媒体对象。 */
+    private static void copyFields(Object target, Object source) {
+        if (target == null || source == null) return;
+        for (Class<?> c = target.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Field f : c.getDeclaredFields()) {
+                if (Modifier.isStatic(f.getModifiers())) continue;
+                f.setAccessible(true);
+                try {
+                    f.set(target, f.get(source));
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
+    /** 结果回传时会立即恢复原图;这里只做兜底,时间放宽避免抢在上传读取之前改回图片。 */
     private static void restoreGridItemsLater(View sendView, java.util.List<String> paths) {
         if (sendView == null) return;
-        sendView.postDelayed(() -> restoreGridItems(paths), 3000L);
+        sendView.postDelayed(() -> restoreGridItems(paths), 10_000L);
     }
 
     private static void replayGridClickAfter(View sendView, String path, View preferredCell,
@@ -843,7 +892,17 @@ public final class LiveSendHook {
         }
         boolean anySwapped = false;
         for (Job j : hits) {
-            if (j.status == ST_READY && j.out != null && swapInResult(data, j)) {
+            boolean swapped = false;
+            if (j.status == ST_READY && j.out != null) {
+                swapped = swapInResult(data, j);
+                // 半屏相册:回传项已是 QQ 重建的压缩对象,按选中顺序替换对应槽位。
+                if (!swapped && j.gridOrder >= 0) {
+                    swapped = swapResultSlot(data, j, j.gridOrder);
+                    if (swapped) Log.i("结果回传按选中顺序替换成视频 slot=" + j.gridOrder
+                            + " path=" + j.path);
+                }
+            }
+            if (swapped) {
                 Log.i("发送结果里的图片换成合成视频 path=" + j.path);
                 LiveSendMarks.remember(j.out.md5, j.out.storePath);
                 scheduleDelete(j.out);
@@ -887,7 +946,41 @@ public final class LiveSendHook {
             }
             if (inResult && (j.autoSend || armedPaths.contains(j.path))) hits.add(j);
         }
+        // 半屏相册回传时会重建压缩后的媒体对象,路径/身份都对不上;按选中顺序兜底认领。
+        if (hits.isEmpty()) {
+            int batch = latestGridBatch;
+            java.util.List<Job> ordered = new java.util.ArrayList<>();
+            for (Job j : jobs.values()) {
+                if (j.gridOrder >= 0 && j.out != null && j.gridBatch == batch) ordered.add(j);
+            }
+            ordered.sort(java.util.Comparator.comparingInt(o -> o.gridOrder));
+            Log.i("结果回传未按路径命中 结果数=" + list.size() + " 网格候选=" + ordered.size()
+                    + " orders=" + orderText(ordered));
+            if (!ordered.isEmpty()) {
+                int n = Math.min(ordered.size(), list.size());
+                Log.i("结果回传按选中顺序兜底匹配 count=" + n
+                        + " (结果数=" + list.size() + " 候选=" + ordered.size() + ")");
+                return ordered.subList(0, n);
+            }
+        }
         return hits;
+    }
+
+    private static java.util.concurrent.atomic.AtomicInteger gridBatchSeq =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static volatile int latestGridBatch = -1;
+
+    private static int nextGridBatch() {
+        int v = gridBatchSeq.incrementAndGet();
+        latestGridBatch = v;
+        return v;
+    }
+
+    private static String orderText(List<Job> ordered) {
+        StringBuilder sb = new StringBuilder();
+        for (Job j : ordered) sb.append(j.gridOrder).append(':').append(j.status)
+                .append('/').append(j.sent ? 'S' : '-').append(' ');
+        return sb.toString().trim();
     }
 
     /** 把结果里的媒体项换成合成视频的副本,相册里的原图对象不动。 */
@@ -910,6 +1003,19 @@ public final class LiveSendHook {
         return true;
     }
 
+    /** 结果项对不上原图时,按选中顺序把结果槽位整体换成视频副本。 */
+    private static boolean swapResultSlot(Intent data, Job j, int slot) {
+        List<Object> list = resultList(data);
+        if (list == null || j.out == null || slot < 0 || slot >= list.size()) return false;
+        Object source = list.get(slot);
+        if (source == null) return false;
+        Object copy = copyOf(source);
+        if (copy == null) return false;
+        applyVideoFields(copy, j.out);
+        list.set(slot, copy);
+        return true;
+    }
+
     /** 结果 Intent 里装着媒体列表的容器(AlbumResult)。 */
     @SuppressWarnings("unchecked")
     private static List<Object> resultList(Intent data) {
@@ -922,12 +1028,28 @@ public final class LiveSendHook {
         }
         if (b == null) return null;
         List<Object> hit = listIn(safeGet(b, "ALBUM_RESULT"));
-        if (hit != null) return hit;
+        if (hit != null && hasMedia(hit)) return hit;
+        // extras 里可能有多个 List(路径字符串、图片信息等);必须取真正装媒体的那个,
+        // 否则槽位替换会落在错误的列表上,视频就换不进去。
+        List<Object> fallback = null;
         for (String k : b.keySet()) {
             List<Object> l = listIn(safeGet(b, k));
-            if (l != null) return l;
+            if (l == null || l.isEmpty()) continue;
+            if (hasMedia(l)) return l;
+            if (fallback == null) fallback = l;
         }
-        return null;
+        return hit != null ? hit : fallback;
+    }
+
+    /** 列表里是否存在能解析出文件路径的媒体项。 */
+    private static boolean hasMedia(List<Object> list) {
+        int checked = 0;
+        for (Object o : list) {
+            if (o == null) continue;
+            if (pathOf(o) != null) return true;
+            if (++checked >= 5) break;
+        }
+        return false;
     }
 
     private static Object safeGet(Bundle b, String key) {
