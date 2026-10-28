@@ -413,8 +413,26 @@ public final class LiveSendHook {
     }
 
     private static void rememberGridClickBefore(View view) {
-        View cell = gridCellForView(view);
-        if (cell == null) return;
+        final View cell = gridCellForView(view);
+        if (cell == null) {
+            // 半屏 onBind 钩子可能没挂上,cellPaths 里没有这个格子:
+            // 从点击目标向上找格子,再从格子/其父容器反解媒体对象,直接登记路径。
+            final View guess = guessCellFromClick(view);
+            if (guess == null) return;
+            String guessed = pathOfGridCell(guess);
+            if (guessed != null) {
+                synchronized (cellPaths) {
+                    cellPaths.put(guess, guessed);
+                }
+                Log.i("网格点击: 未登记格子已补路径 " + guessed);
+            }
+            boolean sel = isCellSelected(guess)
+                    || (guessed != null && Boolean.TRUE.equals(manualGridSelected.get(guessed)));
+            synchronized (pendingGridClicks) {
+                pendingGridClicks.put(view, sel);
+            }
+            return;
+        }
         String path;
         synchronized (cellPaths) {
             path = cellPaths.get(cell);
@@ -434,10 +452,19 @@ public final class LiveSendHook {
         if (was == null) return;
         view.postDelayed(() -> {
             View cell = gridCellForView(view);
+            if (cell == null) cell = guessCellFromClick(view);
             if (cell == null) return;
             String path;
             synchronized (cellPaths) {
                 path = cellPaths.get(cell);
+            }
+            if (path == null) {
+                path = pathOfGridCell(cell);
+                if (path != null) {
+                    synchronized (cellPaths) {
+                        cellPaths.put(cell, path);
+                    }
+                }
             }
             if (path == null) return;
             boolean now = isCellSelected(cell);
@@ -447,6 +474,51 @@ public final class LiveSendHook {
             Log.i("网格点击选择同步: path=" + path + " before=" + was + " viewNow=" + now
                     + " selected=" + selected);
         }, 80L);
+    }
+
+    /** 从点击目标向上找可用的网格格子(RecyclerView 的直接子项)。 */
+    private static View guessCellFromClick(View view) {
+        if (view == null) return null;
+        View best = null;
+        for (View p = view; p != null; p = p.getParent() instanceof View
+                ? (View) p.getParent() : null) {
+            View parent = p.getParent() instanceof View ? (View) p.getParent() : null;
+            if (parent == null) break;
+            if ("androidx.recyclerview.widget.RecyclerView".equals(parent.getClass().getName())) {
+                return p;
+            }
+            if (p != view) best = p;
+        }
+        return best;
+    }
+
+    /** 从格子视图及其父容器里反射找带路径的媒体对象。 */
+    private static String pathOfGridCell(View cell) {
+        if (cell == null) return null;
+        String direct = pathOfLoose(cell.getTag());
+        if (direct != null) return direct;
+        for (View p = cell; p != null && p.getParent() instanceof View; p = (View) p.getParent()) {
+            View parent = (View) p.getParent();
+            if ("androidx.recyclerview.widget.RecyclerView".equals(parent.getClass().getName())) {
+                Object holder = holderOf(parent, cell);
+                String fromHolder = pathOfLoose(mediaFromHolder(holder));
+                if (fromHolder != null) {
+                    Object media = mediaFromHolder(holder);
+                    if (media != null) cellItems.put(cell, media);
+                    return fromHolder;
+                }
+                break;
+            }
+        }
+        return null;
+    }
+
+    private static Object holderOf(View rv, View cell) {
+        try {
+            return XposedHelpers.callMethod(rv, "getChildViewHolder", cell);
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static View gridCellForView(View view) {
@@ -1744,6 +1816,15 @@ public final class LiveSendHook {
         final TextView btn = new TextView(ctx);
         btn.setId(BTN_ID);
         btn.setSingleLine(true);
+        // 每个新会话的按钮都必须从"未选中"起步:否则会沿用上一轮的勾选态,
+        // 看起来像默认就是开启的。
+        armedPaths.clear();
+        manualGridSelected.clear();
+        for (Job j : jobs.values()) {
+            j.checked = false;
+            j.autoSend = false;
+            j.autoItem = null;
+        }
         btn.setGravity(android.view.Gravity.CENTER);
         btn.setPadding(dp(ctx, 8), dp(ctx, 3), dp(ctx, 8), dp(ctx, 3));
         btn.setTextSize(TypedValue.COMPLEX_UNIT_PX, anchor.getTextSize());
@@ -2590,10 +2671,12 @@ public final class LiveSendHook {
     private static boolean hookHolderPathAdapter(Object adapter, Class<?> c) {
         gridAdapterRef = new java.lang.ref.WeakReference<>(adapter);
         int n = 0;
-        for (Class<?> k = c; k != null && k != Object.class && n == 0; k = k.getSuperclass()) {
+        // 逐层向上挂:onBindViewHolder 常声明在父类,不能命中一层就停。
+        for (Class<?> k = c; k != null && k != Object.class; k = k.getSuperclass()) {
             for (Method m : k.getDeclaredMethods()) {
-                if (!m.getName().equals("onBindViewHolder")
-                        || Modifier.isAbstract(m.getModifiers())) continue;
+                if (!m.getName().equals("onBindViewHolder")) continue;
+                if (Modifier.isAbstract(m.getModifiers())) continue;
+                if (m.getReturnType() != void.class) continue;
                 if (hookedMethods.contains(m)) continue;
                 try {
                     XposedBridge.hookMethod(m, BIND_HOOK);
