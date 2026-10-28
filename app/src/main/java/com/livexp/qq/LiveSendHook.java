@@ -2251,7 +2251,17 @@ public final class LiveSendHook {
             btn.setTextColor(0xFFFFFFFF);
         } else {
             btn.setBackground(null);
-            btn.setTextColor(0xFFFFFFFF);
+            btn.setTextColor(isNightMode(ctx) ? 0xFFFFFFFF : 0xFF202124);
+        }
+    }
+
+    private static boolean isNightMode(Context ctx) {
+        try {
+            int mode = ctx.getResources().getConfiguration().uiMode
+                    & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+            return mode == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        } catch (Throwable ignored) {
+            return false;
         }
     }
 
