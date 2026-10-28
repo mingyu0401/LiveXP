@@ -468,9 +468,12 @@ public final class LiveSendHook {
             }
             if (path == null) return;
             boolean now = isCellSelected(cell);
-            boolean selected = now || !was;
+            // QQ 重绑/滚动会让 cell 的 selected 短暂回到 false,但这不等于用户取消选择。
+            // 已由本次点击确认过的路径保持粘性,直到新选择会话清空。
+            boolean selected = now || !was || Boolean.TRUE.equals(manualGridSelected.get(path));
             if (selected) manualGridSelected.put(path, Boolean.TRUE);
-            else manualGridSelected.remove(path);
+            // 不在这里删除:QQ 的 RecyclerView 重绑会短暂把 View 复位为未选中,
+            // 这不是用户取消选择;新选择会话由 resetSelectionSessionState 统一清理。
             Log.i("网格点击选择同步: path=" + path + " before=" + was + " viewNow=" + now
                     + " selected=" + selected);
         }, 80L);
@@ -2421,13 +2424,16 @@ public final class LiveSendHook {
     }
 
     private static void resetSelectionSessionState() {
+        String selectedPath = currentPath;
+        Object selectedItem = currentItem;
         armedPaths.clear();
-        manualGridSelected.clear();
+        // manualGridSelected 由点击事件建立,不能在按钮延迟挂载时清掉;
+        // 新选择会话真正切换时由新点击/窗口生命周期覆盖。
         synchronized (pendingGridClicks) {
             pendingGridClicks.clear();
         }
-        currentPath = null;
-        currentItem = null;
+        currentPath = selectedPath;
+        currentItem = selectedItem;
         for (Job j : jobs.values()) {
             j.checked = false;
             j.sent = false;
