@@ -2007,7 +2007,11 @@ public final class LiveSendHook {
         if (bar == null) return;
         View previousBar = lastSelectionBar == null ? null : lastSelectionBar.get();
         if (previousBar != bar) {
-            resetSelectionSessionState();
+            // 上一个底栏所在的窗口已经关掉 = 真正换了选择会话,这时才清网格选择记录;
+            // 同一个窗口里 QQ 迟一点才建底栏时不能清,否则会抹掉刚点好的图。
+            boolean previousGone = previousBar == null || !previousBar.isAttachedToWindow()
+                    || previousBar.getWindowVisibility() != View.VISIBLE;
+            resetSelectionSessionState(previousGone);
             lastSelectionBar = new java.lang.ref.WeakReference<View>(bar);
         }
         synchronized (buttons) {
@@ -2629,10 +2633,20 @@ public final class LiveSendHook {
         });
     }
 
-    private static void resetSelectionSessionState() {
+    /**
+     * @param previousBarGone 上一个底栏所在窗口已经关掉:这是真正的新选择会话,
+     *                        此时才清 manualGridSelected / 预览项。
+     */
+    private static void resetSelectionSessionState(boolean previousBarGone) {
         String selectedPath = currentPath;
         Object selectedItem = currentItem;
         armedPaths.clear();
+        if (previousBarGone) {
+            manualGridSelected.clear();
+            selectionRoot = null;
+            selectedPath = null;
+            selectedItem = null;
+        }
         // manualGridSelected 由点击事件建立,不能在按钮延迟挂载时清掉;
         // 新选择会话真正切换时由新点击/窗口生命周期覆盖。
         synchronized (pendingGridClicks) {
@@ -2646,7 +2660,7 @@ public final class LiveSendHook {
             j.autoSend = false;
             j.autoItem = null;
         }
-        Log.i("实况转MP4: 新选择会话,默认取消按钮选中态");
+        Log.i("实况转MP4: 新选择会话,默认取消按钮选中态 previousGone=" + previousBarGone);
     }
 
     /**
