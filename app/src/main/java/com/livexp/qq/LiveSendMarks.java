@@ -271,7 +271,8 @@ public final class LiveSendMarks {
                             } catch (Throwable ignored) {
                             }
                         }
-                        LiveComposer.deleteQuietly(f);
+                        // video_cache 是大图播放和发送共用的提取缓存:只清登记行,不删文件。
+                        if (!isSharedCache(f)) LiveComposer.deleteQuietly(f);
                         deleted++;
                     }
                 }
@@ -281,6 +282,15 @@ public final class LiveSendMarks {
             if (deleted > 0) Log.i("媒体库残留实况视频已清理: " + deleted + " 行");
         } catch (Throwable t) {
             Log.i("媒体库残留清理失败: " + t);
+        }
+    }
+
+    /** 模块共享的提取缓存(video_cache):发送与播放都复用它,不能按临时残留删除。 */
+    private static boolean isSharedCache(File f) {
+        try {
+            return f != null && f.getAbsolutePath().contains("/video_cache/");
+        } catch (Throwable t) {
+            return false;
         }
     }
 

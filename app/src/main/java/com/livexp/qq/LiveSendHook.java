@@ -58,6 +58,13 @@ public final class LiveSendHook {
      */
     private static final int VIDEO_MEDIA_TYPE = 1;
 
+    /**
+     * 已封存:LiveComposer 的「动态段 + 3 秒定格」融合编码不再参与发送,
+     * 勾选后改为直接发送实况图内嵌的原始视频(不重编码/不拼接/不改时长)。
+     * 合成实现与编码参数原样保留,置回 false 即可恢复旧行为。
+     */
+    private static final boolean SEAL_MP4_COMPOSE = true;
+
     private static final int BTN_ID = 0x7e0b1e20;
     /**
      * 发送后过多久回收临时视频。
@@ -86,6 +93,8 @@ public final class LiveSendHook {
     private static final Map<TextView, android.view.WindowManager> overlayWindows = new WeakHashMap<>();
     /** 上一次选择会话的底栏;底栏换新即视为重新打开选择界面,清除按钮的选中态。 */
     private static java.lang.ref.WeakReference<View> lastSelectionBar;
+    /** 当前承载按钮的底栏:它解绑即视为这次预览窗口关闭(半屏/全屏通用)。 */
+    private static java.lang.ref.WeakReference<View> activeBar;
     /** 底栏 View → 看门人:QQ 会重建底栏子 View,按钮被抹掉时要重新挂回去。 */
     private static final Map<View, android.view.ViewTreeObserver.OnGlobalLayoutListener> watchers =
             new WeakHashMap<>();
@@ -166,6 +175,7 @@ public final class LiveSendHook {
         hookResultDelivery();
         hookGridSendClick();
         hookAlbumResume();
+        hookActivityDestroy();
         hookWindowAdd();
         LiveSendMarks.loadAsync();
         Log.i("send hook installed on " + preview.getName());
@@ -237,6 +247,46 @@ public final class LiveSendHook {
         } catch (Throwable t) {
             Log.i("hook album resume failed: " + t);
         }
+    }
+
+    /**
+     * 全屏相册/放大页可能以独立 Activity 承载:页面销毁时结束这次选择会话,
+     * 让「解析实况」按钮回到未选中,并作废这次会话的解析结论。
+     */
+    private static void hookActivityDestroy() {
+        try {
+            XposedBridge.hookAllMethods(android.app.Instrumentation.class,
+                    "callActivityOnDestroy", new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            try {
+                                Object a = param.args != null && param.args.length > 0
+                                        ? param.args[0] : null;
+                                if (!(a instanceof android.app.Activity)) return;
+                                View root = selectionRoot == null ? null : selectionRoot.get();
+                                if (root == null) return;
+                                if (activityOf(root.getContext()) == a) {
+                                    endPreviewSession("activity destroyed: "
+                                            + a.getClass().getSimpleName());
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    });
+            Log.i("Activity 销毁钩子已挂");
+        } catch (Throwable t) {
+            Log.i("hook activity destroy failed: " + t);
+        }
+    }
+
+    /** 沿 ContextWrapper 链找到 View 所属 Activity。 */
+    private static android.app.Activity activityOf(Context ctx) {
+        Context c = ctx;
+        while (c instanceof android.content.ContextWrapper
+                && !(c instanceof android.app.Activity)) {
+            c = ((android.content.ContextWrapper) c).getBaseContext();
+        }
+        return c instanceof android.app.Activity ? (android.app.Activity) c : null;
     }
 
     // ------------------------------------------------------------ hook
@@ -372,6 +422,11 @@ public final class LiveSendHook {
             return;
         }
         if (!live) return;
+        if (SEAL_MP4_COMPOSE) {
+            // 已封存合成:预热只做到文件级实况判定为止。真正的视频提取等用户勾选时再做,
+            // 避免相册一打开就对所有可见实况格子批量提取、白白占用 CPU 和 IO。
+            return;
+        }
         Job j = job(path);
         if (j.autoQueued || j.checked || j.status == ST_PARSING || j.status == ST_READY) return;
         j.autoQueued = true;
@@ -725,7 +780,7 @@ public final class LiveSendHook {
             j.deferred = p;
         }
         if (waiting) {
-            toast("实况转MP4 转码中…完成后自动发送");
+            toast("实况视频提取中…完成后自动发送");
             Log.i("网格发送已拦下,等转码完成 paths=" + paths.size());
             return true;
         }
@@ -1440,7 +1495,7 @@ public final class LiveSendHook {
                 startParse(path, j);
             }
             if (!takeOverSend(j, item, param.thisObject)) return;
-            toast("实况转MP4 转码中…完成后自动发送");
+            toast("实况视频提取中…完成后自动发送");
             if (resultChannel(param.thisObject)) {
                 // 结果回传通道:等结果回传时再换视频
                 return;
@@ -1834,10 +1889,33 @@ public final class LiveSendHook {
             try {
                 bottom.getViewTreeObserver().addOnGlobalLayoutListener(l);
                 watchers.put(bottom, l);
+                bottom.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                    @Override
+                    public void onViewAttachedToWindow(View v) {
+                    }
+
+                    @Override
+                    public void onViewDetachedFromWindow(View v) {
+                        onBarMaybeClosed(v);
+                    }
+                });
             } catch (Throwable t) {
                 Log.i("底栏看门人注册失败: " + t);
             }
         }
+    }
+
+    /**
+     * 底栏解绑 = 预览/选图窗口关闭。等 600ms 再确认:QQ 重建底栏、切原图态时也会短暂解绑,
+     * 这时新底栏已经挂上(activeBar 指向新底栏),不能误判成关窗。
+     */
+    private static void onBarMaybeClosed(final View bar) {
+        MAIN.postDelayed(() -> {
+            if (bar.isAttachedToWindow()) return;
+            View active = activeBar == null ? null : activeBar.get();
+            if (active != null && active != bar) return;
+            endPreviewSession("bottom bar detached");
+        }, 600L);
     }
 
     /** DecorView 级兜底:任何一次布局只要看到"原图/编辑 + 发送"的底栏而没有按钮,就补一个。 */
@@ -1924,7 +2002,7 @@ public final class LiveSendHook {
                     // 窗口确实消失(面板/全屏相册关闭)才算一次选择会话结束:
                     // 只清"没有底栏"那一刻的瞬时布局抖动会误杀刚选好的图。
                     if (!root.isAttachedToWindow() || root.getWindowVisibility() != View.VISIBLE) {
-                        endGridSession();
+                        endPreviewSession("window closed");
                     }
                 }
                 return;
@@ -2035,6 +2113,7 @@ public final class LiveSendHook {
         final ViewGroup bar = anchor.getParent() instanceof ViewGroup
                 ? (ViewGroup) anchor.getParent() : null;
         if (bar == null) return;
+        activeBar = new java.lang.ref.WeakReference<View>(bar);
         View previousBar = lastSelectionBar == null ? null : lastSelectionBar.get();
         if (previousBar != bar) {
             // 上一个底栏所在的窗口已经关掉 = 真正换了选择会话,这时才清网格选择记录;
@@ -2545,9 +2624,19 @@ public final class LiveSendHook {
     private static void startParse(String path, Job j) {
         j.autoQueued = true;
         j.status = ST_PARSING;
+        if (SEAL_MP4_COMPOSE) {
+            startRawVideoParse(path, j);
+            return;
+        }
         Log.i("实况转MP4 启动: " + path);
         LiveComposer.composeAsync(path, (status, src, out, err) -> {
-            Job jj = job(src);
+            Job jj = jobs.get(src);
+            if (jj != j) {
+                // 会话已结束或已换到新会话:上一次窗口的结论不能写回来。
+                if (out != null) LiveComposer.discard(out);
+                Log.i("转码结果已过期,丢弃 path=" + src + " status=" + status);
+                return;
+            }
             if (status == LiveComposer.OK) {
                 jj.status = ST_READY;
                 jj.out = out;
@@ -2584,6 +2673,83 @@ public final class LiveSendHook {
             if (src.equals(currentPath)) refreshButtons();
             if (armedPaths.contains(src)) refreshButtons();
         });
+    }
+
+    /**
+     * 封存合成后的解析:直接提取实况图内嵌的原始视频(复用 video_cache),不做任何重编码。
+     * 失败只记日志并置 ST_FAILED,发送时静默按原图走,不阻断发送流程。
+     */
+    private static void startRawVideoParse(final String path, final Job j) {
+        Boolean verdict = liveVerdict.get(path);
+        if (Boolean.FALSE.equals(verdict)) {
+            j.status = ST_NOT_LIVE;
+            Log.i("实况解析跳过:非实况图 " + path);
+            MAIN.post(LiveSendHook::refreshButtons);
+            return;
+        }
+        Log.i("实况解析(原生视频)启动: " + path);
+        IO.execute(() -> {
+            LiveComposer.Out out = null;
+            String err = null;
+            int status;
+            try {
+                out = LiveComposer.rawVideoOut(path);
+                status = LiveComposer.OK;
+            } catch (Throwable t) {
+                status = LiveComposer.FAILED;
+                err = t.getClass().getSimpleName() + ": " + t.getMessage();
+            }
+            final LiveComposer.Out fo = out;
+            final String fe = err;
+            final int fs = status;
+            MAIN.post(() -> onRawVideoResult(path, j, fs, fo, fe));
+        });
+    }
+
+    /** 提取结果回到主线程:会话已经换掉就丢弃,不能把上一张图的结论套到新会话。 */
+    private static void onRawVideoResult(String src, Job j, int status,
+                                         LiveComposer.Out out, String err) {
+        if (jobs.get(src) != j) {
+            if (out != null) LiveComposer.discard(out);
+            Log.i("实况解析结果已过期,丢弃 path=" + src + " status=" + status);
+            return;
+        }
+        if (status == LiveComposer.OK) {
+            j.status = ST_READY;
+            j.out = out;
+        } else {
+            j.status = status == LiveComposer.NOT_LIVE ? ST_NOT_LIVE : ST_FAILED;
+            j.out = null;
+            Log.i("实况解析失败,按原图发送 path=" + src + " err=" + err);
+        }
+        Log.i("实况解析结果 " + src + " -> status=" + j.status);
+        if (j.pending != null) {
+            releasePending(j);
+            return;
+        }
+        if (j.deferred != null) {
+            releaseDeferred(j);
+            return;
+        }
+        if (j.autoSend) {
+            MAIN.postDelayed(() -> {
+                if (!j.autoSend || j.pending != null || j.deferred != null) return;
+                Log.i("发送结果没有回传,按原图已发送处理 path=" + j.path);
+                j.autoSend = false;
+                jobs.remove(j.path);
+                if (j.out != null) {
+                    LiveComposer.discard(j.out);
+                    j.out = null;
+                    j.status = ST_NONE;
+                }
+            }, RESULT_WAIT_MS);
+        } else if (status == LiveComposer.OK && j.sent) {
+            // 这张图已经发出去了,产物没人要:清掉媒体库登记行(共享缓存文件保留)。
+            LiveComposer.discard(out);
+            j.status = ST_NONE;
+            j.out = null;
+        }
+        refreshButtons();
     }
 
     private static void refreshButtons() {
@@ -2697,21 +2863,42 @@ public final class LiveSendHook {
      * 选择会话结束(相册面板/全屏相册窗口真的关掉了):网格选择记录必须清掉,
      * 否则下次打开相册时会带着上一轮的"已选图片",一点按钮就按旧路径开工。
      */
-    private static void endGridSession() {
-        if (manualGridSelected.isEmpty() && cellPaths.isEmpty()) return;
+    private static void endPreviewSession(String reason) {
+        // 被临时改成视频的发送对象先还原,别把视频字段留在相册缓存里。
+        restoreAllGridItems();
+        // 已经点了发送、正在等提取/等回传的任务必须保留,否则会吞掉用户这次发送。
+        java.util.Set<String> keep = new java.util.HashSet<>();
+        for (Job j : jobs.values()) {
+            if (j.pending != null || j.deferred != null || j.autoSend) keep.add(j.path);
+        }
+        for (Job j : new java.util.ArrayList<>(jobs.values())) {
+            if (keep.contains(j.path)) continue;
+            jobs.remove(j.path);
+            if (j.out != null) {
+                LiveComposer.discard(j.out);
+                j.out = null;
+            }
+        }
+        armedPaths.retainAll(keep);
         manualGridSelected.clear();
+        synchronized (pendingGridClicks) {
+            pendingGridClicks.clear();
+        }
         synchronized (cellPaths) {
             cellPaths.clear();
         }
         cellItems.clear();
-        synchronized (pendingGridClicks) {
-            pendingGridClicks.clear();
-        }
         lastCustomization = null;
         selectionRoot = null;
         currentPath = null;
         currentItem = null;
-        Log.i("实况转MP4: 相册窗口关闭,清空网格选择记录");
+        Log.i("选择会话结束(" + reason + "),按钮复位;保留发送中任务=" + keep.size());
+        refreshButtons();
+    }
+
+    private static void restoreAllGridItems() {
+        if (pendingGridRestores.isEmpty()) return;
+        restoreGridItems(new java.util.ArrayList<>(pendingGridRestores.keySet()));
     }
 
     private static void style(TextView btn) {
@@ -2783,7 +2970,7 @@ public final class LiveSendHook {
             case ST_PARSING: return "转换中(" + k + "/" + n + ")";
             case ST_READY: return "转换完成(" + k + "/" + n + ")";
             case ST_NOT_LIVE: return "非实况图";
-            case ST_FAILED: return "转码失败";
+            case ST_FAILED: return "解析失败";
             default: return "实况转MP4";
         }
     }

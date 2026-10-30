@@ -63,6 +63,8 @@ public final class LiveComposer {
         public android.net.Uri storeUri;
         public long storeId = -1;
         public String storePath;
+        /** 产物是模块共享缓存(如 video_cache 里的提取结果):回收时只删媒体库登记行,不删文件。 */
+        public boolean keepFile;
     }
 
     public interface Callback {
@@ -70,6 +72,10 @@ public final class LiveComposer {
         void onResult(int status, String srcPath, Out out, String error);
     }
 
+    /**
+     * 已封存,勿删:发送链路不再调用本方法(`LiveSendHook.SEAL_MP4_COMPOSE` 默认封存),
+     * 改为直接发送实况内嵌的原始视频。融合编码实现与参数原样保留,后续恢复只需把开关置回 false。
+     */
     public static void composeAsync(final String srcPath, final Callback cb) {
         EXEC.execute(() -> {
             int status;
@@ -99,6 +105,53 @@ public final class LiveComposer {
             final int fs = status;
             MAIN.post(() -> cb.onResult(fs, srcPath, fo, fe));
         });
+    }
+
+    /**
+     * 已封存合成分支后的发送产物:直接取实况图内嵌的原始视频,原样发送(不重编码、不拼接、不改时长)。
+     * 复用 {@link LiveVideoPlayer#extract} 的 video_cache(大图播放也读这份),不产生发送专用副本,
+     * 所以 {@link Out#keepFile} 置 true:回收时只删媒体库登记行,video_cache 文件保留。
+     */
+    public static Out rawVideoOut(String srcPath) throws Exception {
+        File raw = LiveVideoPlayer.extract(srcPath);
+        if (raw == null || !raw.isFile() || raw.length() <= 0) {
+            throw new IllegalStateException("内嵌视频提取失败");
+        }
+        Out out = new Out();
+        out.file = raw;
+        out.keepFile = true;
+        android.media.MediaMetadataRetriever mmr = new android.media.MediaMetadataRetriever();
+        try {
+            mmr.setDataSource(raw.getAbsolutePath());
+            out.durationUs = metaLong(mmr, android.media.MediaMetadataRetriever.METADATA_KEY_DURATION) * 1000L;
+            out.width = (int) metaLong(mmr, android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH);
+            out.height = (int) metaLong(mmr, android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT);
+            String audio = mmr.extractMetadata(
+                    android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO);
+            out.hasAudio = "yes".equalsIgnoreCase(audio);
+        } finally {
+            try {
+                mmr.release();
+            } catch (Throwable ignored) {
+            }
+        }
+        if (out.durationUs <= 0 || out.width <= 0 || out.height <= 0) {
+            throw new IllegalStateException("内嵌视频元数据不可用");
+        }
+        out.md5 = LivePhotoDetector.md5OfFile(raw.getAbsolutePath());
+        publish(out);
+        Log.i("原生实况视频就绪: " + raw.getPath() + " " + raw.length() + "B "
+                + out.width + "x" + out.height + " dur=" + (out.durationUs / 1000) + "ms");
+        return out;
+    }
+
+    private static long metaLong(android.media.MediaMetadataRetriever mmr, int key) {
+        try {
+            String v = mmr.extractMetadata(key);
+            return v == null ? 0 : Long.parseLong(v.trim());
+        } catch (Throwable t) {
+            return 0;
+        }
     }
 
     /**
@@ -923,9 +976,15 @@ public final class LiveComposer {
             }
             throw new IllegalStateException("拿不到媒体库 _id");
         }
-        if (dataPath == null) {
-            dataPath = new File(android.os.Environment.getExternalStorageDirectory(),
-                    "Movies/LiveXP/" + name).getAbsolutePath();
+        if (dataPath == null) dataPath = out.file.getAbsolutePath();
+        // 部分 ROM 会改写 DATA 列。落点不是我们这份文件时仍按实际文件路径交给 QQ,
+        // 避免 QQ 拿着一个不存在/被改写的路径去读,最后按图片发出去。
+        File landed = new File(dataPath);
+        if (!out.file.getAbsolutePath().equals(dataPath)
+                && (!landed.isFile() || landed.length() != out.file.length())) {
+            Log.i("媒体库 DATA 落点异常,改用实际文件 path=" + out.file.getAbsolutePath()
+                    + " data=" + dataPath);
+            dataPath = out.file.getAbsolutePath();
         }
         out.storeUri = uri;
         out.storeId = id;
@@ -933,12 +992,16 @@ public final class LiveComposer {
         Log.i("已发布到媒体库 id=" + id + " uri=" + uri + " path=" + dataPath);
     }
 
-    /** 发送确认后清场:删媒体库行 + 删文件(私有目录那份 + 媒体库那份)。 */
+    /**
+     * 发送确认后清场:删媒体库行 + 删本模块自己新建的文件。
+     * {@link Out#keepFile} 的产物是共享缓存(如 video_cache 的提取结果),只删登记行,不动文件。
+     */
     public static void discard(final Out out) {
         if (out == null) return;
         final android.net.Uri uri = out.storeUri;
         final String storePath = out.storePath;
         final File file = out.file;
+        final boolean keep = out.keepFile;
         if (uri != null) {
             IO.execute(() -> {
                 try {
@@ -947,10 +1010,14 @@ public final class LiveComposer {
                 } catch (Throwable t) {
                     Log.i("媒体库行删除失败: " + t);
                 }
+                if (keep) {
+                    Log.i("共享缓存保留: " + (file == null ? storePath : file.getPath()));
+                    return;
+                }
                 if (storePath != null) deleteQuietly(new File(storePath));
                 deleteQuietly(file);
             });
-        } else {
+        } else if (!keep) {
             deleteQuietly(file);
         }
     }
