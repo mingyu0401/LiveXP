@@ -733,8 +733,13 @@ public final class LiveSendHook {
             return false;
         }
         for (String path : paths) {
-            if (!armedPaths.contains(path)) return false;
+            if (!armedPaths.contains(path)) {
+                Log.i("网格发送跳过: 未勾选 path=" + fileName(path));
+                return false;
+            }
         }
+        Log.i("网格发送检查: 选中=" + paths.size() + " 已勾选=" + armedPaths.size()
+                + " 源=" + fileName(paths.get(0)));
         int gridOrder = 0;
         int gridBatch = nextGridBatch();
         java.util.List<Job> jobsToSend = new java.util.ArrayList<>();
@@ -787,6 +792,12 @@ public final class LiveSendHook {
         for (Job j : jobsToSend) {
             if (!swapGridToVideo(j)) {
                 restoreGridItems(paths);
+                // 替换没成功:按钮先回未选中,但保留 armed 给结果回传兜底;
+                // 若回传也没命中(真的按图片发出),logUnmatchedResult 会整体复位。
+                for (Job item : jobsToSend) item.checked = false;
+                currentPath = null;
+                MAIN.post(LiveSendHook::refreshButtons);
+                Log.i("网格发送:未替换成功,按原图发送并等待回传兜底");
                 return false;
             }
         }
@@ -794,7 +805,38 @@ public final class LiveSendHook {
         // 重放会额外触发一次发送,QQ 便会同时发出原图与视频。若该版本不回传结果,
         // 兜底定时恢复网格对象,但不能在发送前恢复,否则 QQ 又会读回压缩图。
         restoreGridItemsLater(sendView, paths);
+        // 媒体对象已换成视频、原生发送已接手:这次会话到此结束,按钮立即回未选中。
+        resetAfterSend(paths, "网格发送");
         return false;
+    }
+
+    /**
+     * 发送已经交给 QQ 之后复位本次会话:按钮回未选中,清掉判定/提取状态,迟到的结果不再回写。
+     * 只清状态不删产物:video_cache 是共享缓存,媒体库登记行由 scheduleDelete 延后清理。
+     */
+    private static void resetAfterSend(java.util.Collection<String> paths, String reason) {
+        if (paths == null || paths.isEmpty()) return;
+        int n = 0;
+        for (String path : paths) {
+            if (path == null) continue;
+            Job j = jobs.remove(path);
+            armedPaths.remove(path);
+            manualGridSelected.remove(path);
+            if (j != null) {
+                j.checked = false;
+                j.sent = false;
+                j.autoSend = false;
+                j.autoItem = null;
+                j.pending = null;
+                j.deferred = null;
+                j.out = null;
+            }
+            n++;
+        }
+        currentPath = null;
+        currentItem = null;
+        MAIN.post(LiveSendHook::refreshButtons);
+        Log.i("解析按钮已复位(" + reason + ") count=" + n);
     }
 
     /**
@@ -837,14 +879,16 @@ public final class LiveSendHook {
             for (Map.Entry<View, String> e : cellPaths.entrySet()) {
                 if (!j.path.equals(e.getValue())) continue;
                 Object item = cellItems.get(e.getKey());
-                if (item == null || pathOfLoose(item) == null) continue;
+                if (item == null) continue;
                 Object snapshot = copyOf(item);
                 if (snapshot == null) continue;
+                boolean hadPath = pathOfLoose(item) != null;
                 applyVideoFields(item, j.out);
                 restores.add(new GridRestore(null, -1, item, snapshot));
                 if (j.autoItem == null) j.autoItem = item;
                 any = true;
-                Log.i("网格发送按钮:cell 媒体对象就地换成视频 path=" + j.path);
+                Log.i("网格发送按钮:cell 媒体对象就地换成视频 path=" + fileName(j.path)
+                        + (hadPath ? "" : "(对象取不到路径,按 cell 路径命中)"));
                 break;
             }
         }
@@ -1111,7 +1155,11 @@ public final class LiveSendHook {
         if (data == null) return;
         if (data == replayIntent) return;
         List<Job> hits = matchJobs(data);
-        if (hits == null || hits.isEmpty()) return;
+        if (hits == null || hits.isEmpty()) {
+            // 勾选了视频却匹配不上回传结果 = 这次很可能按图片发出去了,留一条现场线索。
+            if (!armedPaths.isEmpty()) logUnmatchedResult(data);
+            return;
+        }
         // 有还在转码的(用户点了发送但没转完):按住结果,等转码完成再放行
         Pending hold = null;
         for (Job j : hits) {
@@ -1428,6 +1476,7 @@ public final class LiveSendHook {
                 replayGridClickAfter(d.clickView, new java.util.ArrayList<>(d.gridPaths),
                         d.clickCell, d.clickPosition, d.gridPositions);
             }
+            resetAfterSend(d.gridPaths, "网格发送(等提取后放行)");
             return;
         }
         d = trigger.deferred;
@@ -1438,6 +1487,8 @@ public final class LiveSendHook {
             if (trigger.status == ST_READY && trigger.out != null
                     && swapGridToVideo(trigger)) {
                 replayGridClickAfter(d.clickView, trigger.path, d.clickCell, d.clickPosition);
+                resetAfterSend(java.util.Collections.singletonList(trigger.path),
+                        "单图发送(等提取后放行)");
             } else {
                 Log.i("网格发送转码失败,放行原图 path=" + trigger.path);
                 armedPaths.remove(trigger.path);
@@ -1528,14 +1579,11 @@ public final class LiveSendHook {
             Log.i("send: 换视频失败,按原图发送");
             return;
         }
-        Log.i("send: 媒体引用换成合成视频副本 " + out.width + "x" + out.height
+        Log.i("send: 媒体引用换成实况视频 " + out.width + "x" + out.height
                 + " " + (out.durationUs / 1000) + "ms audio=" + out.hasAudio);
         LiveSendMarks.remember(out.md5, out.storePath);
-        jobs.remove(path);
-        MAIN.post(() -> {
-            refreshButtons();
-            scheduleDelete(out);
-        });
+        scheduleDelete(out);
+        resetAfterSend(java.util.Collections.singletonList(path), "预览页发送");
     }
 
     /** 只有单图预览才接管发送:多选时不动,免得替用户发出意料外的组合。 */
@@ -2920,7 +2968,15 @@ public final class LiveSendHook {
             Job j = jobs.get(path);
             on = j != null && j.checked;
         } else {
-            on = !armedPaths.isEmpty();
+            // 只看真正处于勾选态的任务:armed 可能为了结果兜底而暂时保留
+            on = false;
+            for (String p : armedPaths) {
+                Job j = jobs.get(p);
+                if (j != null && j.checked) {
+                    on = true;
+                    break;
+                }
+            }
         }
         Context ctx = btn.getContext();
         if (on) {
@@ -3588,6 +3644,38 @@ public final class LiveSendHook {
         } catch (Throwable t) {
             Log.i("set 失败 " + method + ": " + t);
         }
+    }
+
+    private static String fileName(String path) {
+        if (path == null) return "null";
+        int i = path.lastIndexOf('/');
+        return i >= 0 ? path.substring(i + 1) : path;
+    }
+
+    /** 结果回传没命中已勾选任务时的现场记录(低频,仅排查"勾了却发图片"用)。 */
+    private static void logUnmatchedResult(Intent data) {
+        try {
+            List<Object> list = resultList(data);
+            Log.i("结果未命中: 已勾选=" + armedPaths.size()
+                    + " 结果表=" + (list == null ? "null" : list.size())
+                    + (list != null && !list.isEmpty() ? " 首项=" + briefOf(list.get(0)) : ""));
+            resetAfterSend(new java.util.ArrayList<>(armedPaths), "结果未命中");
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 媒体项的关键字段摘要:路径、mime、媒体类型、媒体库 id、大小。 */
+    private static String briefOf(Object o) {
+        if (o == null) return "null";
+        StringBuilder sb = new StringBuilder(o.getClass().getName());
+        sb.append("[path=").append(fileName(pathOf(o)));
+        for (String g : new String[]{"getMMimeType", "getMMediaType", "get_id", "getFileSize"}) {
+            try {
+                sb.append(' ').append(g).append('=').append(XposedHelpers.callMethod(o, g));
+            } catch (Throwable ignored) {
+            }
+        }
+        return sb.append(']').toString();
     }
 
     private static String pathOf(Object info) {
