@@ -1985,12 +1985,15 @@ public final class LiveSendHook {
 
     private static void ensureButton(View root) {
         if (root == null) return;
+        long perfT0 = android.os.SystemClock.uptimeMillis();
         try {
             ensureGridAdapter(root);
             Long until = noAnchorUntil.get(root);
             long now = System.currentTimeMillis();
             boolean scanning = until == null || now >= until;
             TextView anchor = scanning ? findPreviewAnchor(root) : cachedAnchorForRoot(root);
+            perfSlow("ensureButton scan=" + scanning + " anchor=" + (anchor != null),
+                    android.os.SystemClock.uptimeMillis() - perfT0);
             if (anchor == null || !alive(anchor)) {
                 // 只有真正扫过确认没有底栏才收按钮:面板开着时负缓存期间不动它
                 if (scanning) {
@@ -2110,6 +2113,7 @@ public final class LiveSendHook {
 
     private static void injectInto(Context ctx, TextView anchor, String from) {
         if (!LiveSettings.parsingEnabled(ctx) || !LiveSettings.sendParseEnabled(ctx)) return;
+        long perfTIn = android.os.SystemClock.uptimeMillis();
         final ViewGroup bar = anchor.getParent() instanceof ViewGroup
                 ? (ViewGroup) anchor.getParent() : null;
         if (bar == null) return;
@@ -2166,6 +2170,8 @@ public final class LiveSendHook {
             place(btn, anchor, bar);
         }, 500L);
         Log.i("实况转MP4 按钮已挂上(" + from + ") bar=" + bar.getClass().getName());
+        perfSlow("injectInto from=" + from,
+                android.os.SystemClock.uptimeMillis() - perfTIn);
         logHostActivity(bar);
     }
 
@@ -2472,6 +2478,7 @@ public final class LiveSendHook {
 
     /** 网格里当前被勾选的图片路径,按网格顺序去重。 */
     private static java.util.List<String> selectedGridPaths() {
+        long perfT0 = android.os.SystemClock.uptimeMillis();
         java.util.LinkedHashSet<String> hits = new java.util.LinkedHashSet<>();
         java.util.List<java.util.List<Object>> lists = knownAdapterLists();
         int picked = 0;
@@ -2481,15 +2488,15 @@ public final class LiveSendHook {
             if (list == null) continue;
             for (Object o : list) {
                 if (o == null) continue;
-                boolean sel = isSelectedItem(o);
-                if (sel) anySelected = true;
+                // 只对真正选中的条目做深度取路径:全屏相册一个表就有 1600+ 项,
+                // 逐项扫对象图会在主线程吃掉一秒以上,而绝大多数条目都没被选中。
+                if (!isSelectedItem(o)) continue;
+                anySelected = true;
                 String p = pathOfLoose(o);
                 if (p == null) continue;
                 withPath++;
-                if (sel) {
-                    hits.add(p);
-                    picked++;
-                }
+                hits.add(p);
+                picked++;
             }
         }
         int cellPicked = 0;
@@ -2509,9 +2516,14 @@ public final class LiveSendHook {
                 if (Boolean.TRUE.equals(e.getValue())) hits.add(e.getKey());
             }
         }
-        Log.i("网格按钮: 表=" + lists.size() + " 带路径=" + withPath
-                + " 数据勾选=" + picked + " anySelected=" + anySelected + " 视图勾选=" + cellPicked
-                + " 实际选中=" + hits.size());
+        long cost = android.os.SystemClock.uptimeMillis() - perfT0;
+        // 只在"确实选中了东西"或"这次扫描异常慢"时记录,避免按钮刷新时刷屏。
+        if (!hits.isEmpty() || cost >= 100L) {
+            Log.i("网格按钮: 表=" + lists.size() + " 带路径=" + withPath
+                    + " 数据勾选=" + picked + " anySelected=" + anySelected
+                    + " 视图勾选=" + cellPicked + " 实际选中=" + hits.size()
+                    + " 耗时=" + cost + "ms");
+        }
         return new java.util.ArrayList<>(hits);
     }
 
@@ -3054,6 +3066,7 @@ public final class LiveSendHook {
 
     private static void ensureGridAdapter(View root) {
         if (!(root instanceof ViewGroup)) return;
+        long perfT0 = android.os.SystemClock.uptimeMillis();
         synchronized (knownGridRoots) {
             knownGridRoots.put(root, Boolean.TRUE);
         }
@@ -3076,6 +3089,8 @@ public final class LiveSendHook {
             } catch (Throwable ignored) {
             }
         }
+        perfSlow("ensureGridAdapter rvs=" + rvs.size() + " pending=" + anyPending,
+                android.os.SystemClock.uptimeMillis() - perfT0);
         // 面板刚打开时数据表常常还是空的:安排延迟重试(面板静止后没有布局事件可依赖)
         if (anyPending && root instanceof View) {
             Integer n = gridRetries.get(root);
@@ -3162,6 +3177,7 @@ public final class LiveSendHook {
      */
     private static void scanExistingCells(View rv, Object adapter) {
         if (!(rv instanceof ViewGroup)) return;
+        long perfT0 = android.os.SystemClock.uptimeMillis();
         java.util.List<Object> data = adapterListOf(adapter);
         if (data == null) return;
         ViewGroup g = (ViewGroup) rv;
@@ -3186,6 +3202,13 @@ public final class LiveSendHook {
             }
         }
         if (done > 0) Log.i("网格补扫完成: " + done + " 格");
+        perfSlow("scanExistingCells cells=" + g.getChildCount() + " done=" + done,
+                android.os.SystemClock.uptimeMillis() - perfT0);
+    }
+
+    /** 主线程慢操作探针:只在超过阈值时记录,用于回归时确认没有新的长阻塞。 */
+    private static void perfSlow(String s, long costMs) {
+        if (costMs >= 80L) Log.i("[PERF] " + s + " ms=" + costMs);
     }
 
     private static final XC_MethodHook BIND_HOOK = new XC_MethodHook() {
@@ -3230,27 +3253,80 @@ public final class LiveSendHook {
         }
     };
 
-    /** LocalMediaInfo 的选中态:方法名/字段名按常见形态试,全失败当未选中。 */
-    private static boolean isSelectedItem(Object item) {
+    /**
+     * 按类缓存的媒体项访问器。
+     * 选中态/路径都是按类固定的:方法名不存在时,逐条探测会每次抛 NoSuchMethodException,
+     * 全屏相册一次选中扫描有 1600+ 条目,单次就能在主线程烧掉 1 秒以上。
+     * 这里每个类只解析一次,之后只做 invoke/字段读。
+     */
+    private static final class ItemAccess {
+        Method pathGetter;
+        final java.util.List<Method> selectedGetters = new java.util.ArrayList<>(2);
+        Field selectedField;
+    }
+
+    private static final Map<Class<?>, ItemAccess> itemAccess =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static ItemAccess accessOf(Object item) {
+        Class<?> c = item.getClass();
+        ItemAccess a = itemAccess.get(c);
+        if (a != null) return a;
+        a = new ItemAccess();
+        a.pathGetter = findMethod(c, "getPath");
+        if (a.pathGetter != null) a.pathGetter.setAccessible(true);
         for (String g : new String[]{"isIsSelected", "getIsSelected", "isSelected",
                 "isChecked", "getChecked", "isCheck"}) {
+            Method m = findMethod(c, g);
+            if (m == null) continue;
+            Class<?> rt = m.getReturnType();
+            if (rt != boolean.class && rt != Boolean.class) continue;
+            m.setAccessible(true);
+            a.selectedGetters.add(m);
+        }
+        if (a.selectedGetters.isEmpty()) {
+            for (Class<?> k = c; k != null && k != Object.class && a.selectedField == null;
+                 k = k.getSuperclass()) {
+                for (Field f : k.getDeclaredFields()) {
+                    if (f.getType() != boolean.class && f.getType() != Boolean.class) continue;
+                    String n = f.getName().toLowerCase(java.util.Locale.US);
+                    if (!n.contains("select") && !n.contains("check")) continue;
+                    f.setAccessible(true);
+                    a.selectedField = f;
+                    break;
+                }
+            }
+        }
+        itemAccess.put(c, a);
+        return a;
+    }
+
+    private static Method findMethod(Class<?> c, String name) {
+        for (Class<?> k = c; k != null && k != Object.class; k = k.getSuperclass()) {
             try {
-                Object r = XposedHelpers.callMethod(item, g);
+                return k.getDeclaredMethod(name);
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    /** LocalMediaInfo 的选中态:方法名/字段名按常见形态试,全失败当未选中。 */
+    private static boolean isSelectedItem(Object item) {
+        if (item == null) return false;
+        ItemAccess a = accessOf(item);
+        for (Method m : a.selectedGetters) {
+            try {
+                Object r = m.invoke(item);
                 if (r instanceof Boolean) return (Boolean) r;
             } catch (Throwable ignored) {
             }
         }
-        for (Class<?> c = item.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
-            for (Field f : c.getDeclaredFields()) {
-                if (f.getType() != boolean.class && f.getType() != Boolean.class) continue;
-                String n = f.getName().toLowerCase(java.util.Locale.US);
-                if (!n.contains("select") && !n.contains("check")) continue;
-                f.setAccessible(true);
-                try {
-                    Object v = f.get(item);
-                    if (v instanceof Boolean) return (Boolean) v;
-                } catch (Throwable ignored) {
-                }
+        if (a.selectedField != null) {
+            try {
+                Object v = a.selectedField.get(item);
+                if (v instanceof Boolean) return (Boolean) v;
+            } catch (Throwable ignored) {
             }
         }
         return false;
@@ -3515,8 +3591,11 @@ public final class LiveSendHook {
     }
 
     private static String pathOf(Object info) {
+        if (info == null) return null;
+        Method g = accessOf(info).pathGetter;
+        if (g == null) return null;
         try {
-            Object p = XposedHelpers.callMethod(info, "getPath");
+            Object p = g.invoke(info);
             return p instanceof String ? (String) p : null;
         } catch (Throwable t) {
             return null;
